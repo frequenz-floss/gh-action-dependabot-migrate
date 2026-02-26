@@ -311,6 +311,7 @@ runs:
     # Removing the intervention-done-label is treated as
     # undoing the completion signal and fails intentionally.
     - name: Handle intervention done
+      id: handle-intervention
       if: >-
         steps.check-status.outputs.already_migrated == 'true'
         && (
@@ -656,16 +657,17 @@ runs:
     # Two cases:
     #   a. Migration just ran and failed (overall_exit != 0).
     #   b. Migration ran previously and intervention is still pending
-    #      (e.g. a @dependabot rebase triggered a synchronize event).
+    #      (and this run did not just resolve intervention labels).
     - name: Fail if intervention needed
       if: >-
         always()
         && (
           (steps.run-migration.outputs.migration_ran == 'true'
            && steps.run-migration.outputs.overall_exit != '0')
-          || (steps.check-status.outputs.already_migrated == 'true'
-              && steps.check-status.outputs.intervention_pending == 'true')
-        )
+            || (steps.check-status.outputs.already_migrated == 'true'
+               && steps.check-status.outputs.intervention_pending == 'true'
+               && steps.handle-intervention.conclusion != 'success')
+          )
       shell: bash
       run: |
         echo "::error::Migration requires manual intervention. See the PR comment for details."
