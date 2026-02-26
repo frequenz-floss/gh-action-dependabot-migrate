@@ -299,22 +299,30 @@ runs:
           echo "intervention_pending=false" >>"$GITHUB_OUTPUT"
         fi
 
-    # ── 3. Handle intervention resolution ──────────────────────────────
+    # ── 3. Handle intervention label changes ───────────────────────────
     #
     # The user can signal that intervention is done in two ways:
     #   a. Remove the intervention-pending-label.
     #   b. Add the intervention-done-label.
     #
-    # Either action triggers this step, which normalises the label state
-    # (remove pending, add done), and posts next-step instructions.
+    # Users can also mark intervention as pending again by adding the
+    # intervention-pending-label.
     #
-    # Removing the intervention-done-label is treated as
+    # This step handles intervention label transitions and posts
+    # next-step instructions:
+    #   a. Resolve intervention (remove pending, add done).
+    #   b. Mark intervention as needed again (remove done).
+    #
+    # Removing the intervention-done-label is also treated as
     # undoing the completion signal and fails intentionally.
-    - name: Handle intervention done
+    - name: Handle intervention labels
       id: handle-intervention
       if: >-
         steps.check-status.outputs.already_migrated == 'true'
         && (
+          (github.event.action == 'labeled'
+           && github.event.label.name == inputs.intervention-pending-label)
+          ||
           (github.event.action == 'unlabeled'
            && github.event.label.name == inputs.intervention-pending-label)
           || (github.event.action == 'labeled'
@@ -657,16 +665,26 @@ runs:
     # Two cases:
     #   a. Migration just ran and failed (overall_exit != 0).
     #   b. Migration ran previously and intervention is still pending
-    #      (and this run did not just resolve intervention labels).
+    #      (and this run did not just mark intervention as completed).
     - name: Fail if intervention needed
       if: >-
         always()
         && (
           (steps.run-migration.outputs.migration_ran == 'true'
            && steps.run-migration.outputs.overall_exit != '0')
-            || (steps.check-status.outputs.already_migrated == 'true'
-               && steps.check-status.outputs.intervention_pending == 'true'
-               && steps.handle-intervention.conclusion != 'success')
+            || (
+              steps.check-status.outputs.already_migrated == 'true'
+              && steps.check-status.outputs.intervention_pending == 'true'
+              && !(
+                steps.handle-intervention.conclusion == 'success'
+                && (
+                  (github.event.action == 'unlabeled'
+                   && github.event.label.name == inputs.intervention-pending-label)
+                  || (github.event.action == 'labeled'
+                      && github.event.label.name == inputs.intervention-done-label)
+                )
+              )
+            )
           )
       shell: bash
       run: |

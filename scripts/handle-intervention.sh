@@ -8,9 +8,13 @@
 #   a. Remove the intervention-pending-label.
 #   b. Add the intervention-done-label.
 #
-# This script normalises the label state (remove pending, add done)
-# and posts next-step instructions.  Removing the done-label is
-# treated as undoing the completion signal and fails intentionally.
+# Users can also signal that intervention is needed again by adding
+# the intervention-pending-label after completion.
+#
+# This script handles intervention label transitions and posts
+# next-step instructions.  Removing the done-label or adding the
+# pending-label again is treated as undoing completion and fails
+# intentionally.
 #
 # Expected environment variables (set by the composite action):
 #   PR_NUMBER          – pull request number
@@ -30,6 +34,35 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ── Pending-label addition: intervention needed again ─────────────
+if [ "$EVENT_ACTION" = "labeled" ] &&
+  [ "$EVENT_LABEL" = "$LABEL_PENDING" ]; then
+  LABEL_NAME="$LABEL_DONE" \
+    "${SCRIPT_DIR}/remove-label.sh"
+
+  PARA="Manual intervention has been marked as needed again.  The "
+  PARA="${PARA}\`${LABEL_DONE}\` label has been removed.  Please "
+  PARA="${PARA}complete the manual steps and then remove the "
+  PARA="${PARA}\`${LABEL_PENDING}\` label or add the \`${LABEL_DONE}\` "
+  PARA="${PARA}label again."
+  COMMENT_BODY=$(printf '%s\n' \
+    "## ${REPORT_TITLE}" \
+    "" \
+    "${PARA}")
+  gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$COMMENT_BODY" || true
+
+  {
+    echo "## ${REPORT_TITLE}"
+    echo ""
+    echo "Manual intervention has been marked as needed again."
+    echo ""
+    echo "The \`${LABEL_DONE}\` label was removed."
+  } >>"$GITHUB_STEP_SUMMARY"
+
+  echo "::error::${LABEL_PENDING} was added. Intervention is pending again."
+  exit 1
+fi
 
 # ── Done-label removal: undo intervention completion ──────────────
 if [ "$EVENT_ACTION" = "unlabeled" ] &&

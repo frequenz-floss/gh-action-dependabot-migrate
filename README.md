@@ -70,9 +70,11 @@ You should still review, approve and merge the PR yourself, as the
 action does not auto-approve or enable auto-merge for PRs that required
 manual changes.
 
-If the `intervention-done` label is removed afterwards,
-the action treats that as undoing the completion signal and fails the run
-intentionally.  Re-add the done label when intervention is complete.
+If intervention is marked as done and you later need more manual work,
+either removing `intervention-done` or adding `intervention-pending`
+marks intervention as pending again.  In that case, the action removes
+`intervention-done`, posts a PR comment, and fails the run intentionally
+until intervention is marked done again.
 
 ### Re-triggering migration
 

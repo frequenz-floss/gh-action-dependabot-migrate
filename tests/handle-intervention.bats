@@ -132,6 +132,67 @@ teardown() {
   [ "$status" -eq 1 ]
 }
 
+# ── Pending-label added (mark intervention pending again) ─────────
+
+@test "pending-label added removes done label" {
+  export EVENT_ACTION="labeled"
+  export EVENT_LABEL="$LABEL_PENDING"
+  export MOCK_GH_VIEW_LABELS="$(printf '%s\n%s' "$LABEL_PENDING" "$LABEL_DONE")"
+
+  run bash "${REPO_ROOT}/scripts/handle-intervention.sh"
+  assert_failure
+
+  run cat "${MOCK_DIR}/gh_calls.log"
+  assert_output --partial "pr edit 42 --remove-label ${LABEL_DONE}"
+}
+
+@test "pending-label added posts pending-again comment" {
+  export EVENT_ACTION="labeled"
+  export EVENT_LABEL="$LABEL_PENDING"
+  export MOCK_GH_VIEW_LABELS="$(printf '%s\n%s' "$LABEL_PENDING" "$LABEL_DONE")"
+
+  run bash "${REPO_ROOT}/scripts/handle-intervention.sh"
+  assert_failure
+
+  run cat "${MOCK_DIR}/comment_body.txt"
+  assert_output --partial "Manual intervention has been marked as needed again"
+  assert_output --partial "\`${LABEL_DONE}\` label has been removed"
+}
+
+@test "pending-label added writes pending-again summary" {
+  export EVENT_ACTION="labeled"
+  export EVENT_LABEL="$LABEL_PENDING"
+  export MOCK_GH_VIEW_LABELS="$(printf '%s\n%s' "$LABEL_PENDING" "$LABEL_DONE")"
+
+  run bash "${REPO_ROOT}/scripts/handle-intervention.sh"
+  assert_failure
+
+  run cat "${GITHUB_STEP_SUMMARY}"
+  assert_output --partial "Manual intervention has been marked as needed again"
+}
+
+@test "pending-label added summary renders done label as code" {
+  export EVENT_ACTION="labeled"
+  export EVENT_LABEL="$LABEL_PENDING"
+  export MOCK_GH_VIEW_LABELS="$(printf '%s\n%s' "$LABEL_PENDING" "$LABEL_DONE")"
+
+  run bash "${REPO_ROOT}/scripts/handle-intervention.sh"
+  assert_failure
+
+  run cat "${GITHUB_STEP_SUMMARY}"
+  assert_output --partial "The \`${LABEL_DONE}\` label was removed."
+}
+
+@test "pending-label added emits labelled error annotation" {
+  export EVENT_ACTION="labeled"
+  export EVENT_LABEL="$LABEL_PENDING"
+  export MOCK_GH_VIEW_LABELS="$(printf '%s\n%s' "$LABEL_PENDING" "$LABEL_DONE")"
+
+  run bash "${REPO_ROOT}/scripts/handle-intervention.sh"
+  assert_failure
+  assert_output --partial "::error::${LABEL_PENDING} was added."
+}
+
 # ── Intervention completed (pending removed) ──────────────────────
 
 @test "pending removal normalises labels" {
