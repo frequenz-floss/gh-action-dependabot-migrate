@@ -26,7 +26,7 @@ script reports manual intervention is needed.
 3. The action fetches Dependabot metadata (old/new versions).
 4. For each version in the upgrade range, the migration script is
    downloaded from the URL template and executed.
-5. File changes are committed and pushed to the PR branch.
+5. File changes are committed to the PR branch.
 6. A PR comment and job summary are posted with the results.
 7. If all migrations succeed (exit code 0) **and** auto-merge is enabled
    for this case, the PR is auto-approved and auto-merged.
@@ -195,6 +195,7 @@ jobs:
 | `token` | no | `""` | Token for pushing, PR approval, and auto-merge (see [Authentication](#authentication)) |
 | `migration-token` | no | `""` | Token exposed to migration scripts as `GH_TOKEN`/`GITHUB_TOKEN` (see [Authentication](#authentication)) |
 | `auto-merge-on-changes` | no | `"false"` | Auto-approve and auto-merge even when the migration produced commits (requires `token`) |
+| `sign-commits` | no | `"false"` | When `"true"`, create migration commits via API so commits have verified signatures (when supported, for example when using a GitHub App for `token`) |
 | `report-title` | no | `""` | Heading used for PR comments and job summaries; when empty, uses the calling workflow title |
 | `iterate-v0-minors` | no | `"true"` | Iterate through intermediate v0.x minor versions |
 | `python-version` | no | `"3.14"` | Python version for running the script |
@@ -250,9 +251,15 @@ This action uses up to three tokens, each with a distinct role:
 
 * **`GITHUB_TOKEN`** — automatic; housekeeping (labels, comments,
   checkout) and fallback push.
-* **`token`** — optional; push, approve, auto-merge.
+* **`token`** — optional; push (or GraphQL commit), approve,
+  auto-merge.
 * **`migration-token`** — optional; GitHub API access for migration
   scripts.
+
+The `sign-commits` input controls how migration commits are created:
+
+* `"false"` (default) — local `git commit` + `git push`.
+* `"true"` — via GitHub GraphQL API calls using `token`.
 
 The workflow is responsible for generating the `token` and
 `migration-token` values (e.g. via
@@ -296,7 +303,10 @@ An optional input for operations that need to trigger follow-up
 workflows or require elevated permissions.
 
 **Used for:**
-* Pushing migration commits (overrides the `GITHUB_TOKEN` fallback).
+* Pushing migration commits (overrides the `GITHUB_TOKEN` fallback)
+  when `sign-commits` is `"false"`.
+* Creating migration commits via GraphQL `createCommitOnBranch`
+  when `sign-commits` is `"true"`.
 * Approving PRs and enabling auto-merge.
 
 When `token` is omitted, migration commits are pushed with
@@ -374,6 +384,23 @@ appear as that user.  A GitHub App is preferred for organisational use.
 
 For classic PATs, the `repo` scope covers contents and pull requests,
 and the `workflow` scope covers workflow file pushes.
+
+##### Verified commit signatures
+
+If your repository requires signed commits, set `sign-commits: "true"`.
+The action will create migration commits via
+[`planetscale/ghcommit-action`](https://github.com/planetscale/ghcommit-action),
+which calls GitHub's GraphQL `createCommitOnBranch` mutation instead of
+local `git commit`.
+
+With GitHub App installation tokens (recommended), these commits are
+signed by GitHub and shown as **Verified** in the UI.  This is the most
+reliable setup for bot-driven migrations under branch protection rules.
+
+PATs can still be used with `sign-commits: "true"`, but GitHub may not
+mark those commits as **Verified**.  For strict PAT-only
+verified-signing requirements, additional key-based signing support is
+needed.
 
 #### `migration-token`
 

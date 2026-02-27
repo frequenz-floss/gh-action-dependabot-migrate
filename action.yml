@@ -24,9 +24,9 @@
 #
 # - The workflow's `if` checks only the PR title (not github.actor),
 #   because label events from humans would be blocked by an actor
-#   check.  Actor checks are on steps 5, 6, and 19 instead.
+#   check.  Actor checks are on steps 5, 6, and 22 instead.
 #
-# - Steps 5, 6, and 19 also exclude labeled/unlabeled events because
+# - Steps 5, 6, and 22 also exclude labeled/unlabeled events because
 #   Dependabot adds labels (e.g. "dependencies") immediately after
 #   opening a PR, which would trigger a second parallel run that races
 #   with the opened event.  Label events are only relevant for
@@ -50,7 +50,8 @@
 #     GitHub App credentials via actions/create-github-app-token, or a
 #     PAT stored as a secret).  Must trigger follow-up workflows
 #     (merge queue CI, etc.).  When omitted, there is no auto-approve
-#     or auto-merge.
+#     or auto-merge.  When `sign-commits` is enabled, this token is
+#     also used for the GraphQL commit API call.
 #
 #   migration-token (optional input) — exposed to migration scripts
 #     as GITHUB_TOKEN and GH_TOKEN.  When omitted, the migration
@@ -68,29 +69,32 @@
 #   8. Set up Python                      – for running the migration script
 #   9. Run the migration script(s)        – execute per-version scripts
 #  10. Set up Git                         – just before commit
-#  11. Commit migration changes           – create commit if needed
-#  12. Push migration changes             – push with token/GITHUB_TOKEN
-#  13. Build the migration report         – generate Markdown summary
-#  14. Write job summary                  – append summary to $GITHUB_STEP_SUMMARY
-#  15. Post PR comment                    – continue-on-error
-#  16. Label the PR                       – always(), gated on migration_ran
-#  17. Fail if intervention is needed     – always(), blocks merge
-#  18. Approve and auto-merge             – clean migration only
-#  19. Handle patch-only updates          – auto-merge with token,
+#  11. Build commit message               – shared by local and GraphQL commit paths
+#  12. Commit migration changes (local)   – local git commit path
+#  13. Commit migration changes (GraphQL) – GraphQL API commit path
+#  14. Record commit result               – normalise commit_made output
+#  15. Push migration changes             – local git path only
+#  16. Build the migration report         – generate Markdown summary
+#  17. Write job summary                  – append summary to $GITHUB_STEP_SUMMARY
+#  18. Post PR comment                    – continue-on-error
+#  19. Label the PR                       – always(), gated on migration_ran
+#  20. Fail if intervention is needed     – always(), blocks merge
+#  21. Approve and auto-merge             – clean migration only
+#  22. Handle patch-only updates          – auto-merge with token,
 #                                           otherwise instruct manual review
 #
-# Label ordering (step 16): intervention-pending-label is added BEFORE
+# Label ordering (step 19): intervention-pending-label is added BEFORE
 # migrated-label.  If interrupted between the two API calls, the PR
 # stays in a safe state (no migrated label → migration re-runs) rather
 # than a dangerous one (migrated without pending → looks clean).
 #
 # Reliability: step 9 writes migration outputs (overall_exit, report) before
-# any git operations.  Commit and push are explicit steps (11-12), so
+# any git operations.  Commit and push are explicit steps (11-15), so
 # permission/authentication failures are easier to diagnose.  Checkout runs
 # with persist-credentials disabled, and only the push step receives
-# token-backed git credentials. Step 15 (PR comment) uses continue-on-error so
-# a posting failure does not block labels or the intervention check.  Steps 16
-# and 17 use always() so they run even if a prior non-critical step fails.
+# token-backed git credentials. Step 18 (PR comment) uses continue-on-error so
+# a posting failure does not block labels or the intervention check.  Steps 19
+# and 20 use always() so they run even if a prior non-critical step fails.
 
 name: Dependabot Migrate
 description: >-
@@ -115,9 +119,19 @@ inputs:
       omitted, migration commits are pushed with GITHUB_TOKEN and
       no auto-approve or auto-merge is performed.  The workflow is
       responsible for generating this token (e.g. via
-      actions/create-github-app-token in a prior step).
+      actions/create-github-app-token in a prior step).  When
+      `sign-commits` is "true", this token is also used for
+      GraphQL `createCommitOnBranch` commit creation.
     required: false
     default: ""
+  sign-commits:
+    description: >-
+      When "true", create migration commits via GitHub's GraphQL
+      `createCommitOnBranch` mutation so commits are marked as verified
+      when supported (for example with GitHub App tokens).  When
+      "false" (default), use local `git commit` and `git push`.
+    required: false
+    default: "false"
   migration-token:
     description: >-
       Token exposed to migration scripts as GITHUB_TOKEN and
@@ -161,7 +175,7 @@ inputs:
       (Dependabot opens or synchronises a PR) from human-triggered
       label events (intervention resolution).  Steps gated by this
       check: Dependabot metadata fetch (step 5), migration decision
-      (step 6), and patch-only auto-approval (step 19).
+      (step 6), and patch-only auto-approval (step 22).
     required: false
     default: "dependabot[bot]"
   migrated-label:
@@ -249,7 +263,7 @@ outputs:
     value: ${{ steps.check-update.outputs.needs_migration }}
   commit_made:
     description: Whether the migration produced a commit.
-    value: ${{ steps.commit-migration.outputs.commit_made }}
+    value: ${{ steps.commit-result.outputs.commit_made }}
 
 runs:
   using: composite
@@ -491,11 +505,13 @@ runs:
         steps.run-migration.outputs.migration_ran == 'true'
       uses: frequenz-floss/gh-action-setup-git@f9d86a01228ee1cadaac5224d4d7626f1eb23f90  # v1.0.0
 
-    # ── 11. Commit migration changes ───────────────────────────────────
-    - name: Commit migration changes
+    # ── 11. Build commit message ────────────────────────────────────────
+    #
+    # Shared by both commit paths.
+    - name: Build commit message
       if: >-
         steps.run-migration.outputs.migration_ran == 'true'
-      id: commit-migration
+      id: build-commit-message
       shell: bash
       env:
         OLD_VERSION: ${{ steps.check-update.outputs.old_version }}
@@ -505,38 +521,98 @@ runs:
       run: |
         if [ -z "$(git status --porcelain)" ]; then
           echo "No migration changes to commit."
-          echo "commit_made=false" >>"$GITHUB_OUTPUT"
+          echo "has_changes=false" >>"$GITHUB_OUTPUT"
           exit 0
         fi
 
-        MIGRATION_COMMIT_MESSAGE_FILE=$(mktemp)
-        trap 'rm -f "$MIGRATION_COMMIT_MESSAGE_FILE"' EXIT
+        echo "has_changes=true" >>"$GITHUB_OUTPUT"
 
-        printf "Apply migration from $OLD_VERSION to $NEW_VERSION\n\n" >"$MIGRATION_COMMIT_MESSAGE_FILE"
+        HEADLINE=$(printf 'Apply migration from %s to %s' \
+          "$OLD_VERSION" "$NEW_VERSION")
+
         if [ -z "$MIGRATION_REPORT" ]; then
           echo "::warning::run-migration did not provide a migration report"
-          printf "%s\n" "The migration didn't produce any output." >>"$MIGRATION_COMMIT_MESSAGE_FILE"
+          BODY="The migration didn't produce any output."
         else
-          printf "%s" "$MIGRATION_REPORT" >>"$MIGRATION_COMMIT_MESSAGE_FILE"
-        fi
-        printf "\n" >>"$MIGRATION_COMMIT_MESSAGE_FILE"
-        if [ "$OVERALL_EXIT" == "0" ]; then
-          printf "The migration completed successfully.\n" >>"$MIGRATION_COMMIT_MESSAGE_FILE"
-        else
-          printf "The migration completed but requires manual intervention.\n" \
-            >>"$MIGRATION_COMMIT_MESSAGE_FILE"
+          BODY="$MIGRATION_REPORT"
         fi
 
+        if [ "$OVERALL_EXIT" = "0" ]; then
+          FOOTER="The migration completed successfully."
+        else
+          FOOTER="The migration completed but requires manual intervention."
+        fi
+
+        {
+          echo "commit_message<<__COMMIT_MESSAGE_EOF__"
+          printf '%s\n\n%s\n\n%s\n' "$HEADLINE" "$BODY" "$FOOTER"
+          echo "__COMMIT_MESSAGE_EOF__"
+        } >>"$GITHUB_OUTPUT"
+
+    # ── 12. Commit migration changes (local git path) ───────────────────
+    - name: Commit migration changes (local git)
+      if: >-
+        steps.run-migration.outputs.migration_ran == 'true'
+        && inputs.sign-commits != 'true'
+        && steps.build-commit-message.outputs.has_changes == 'true'
+      id: commit-migration-local
+      shell: bash
+      env:
+        COMMIT_MESSAGE: ${{ steps.build-commit-message.outputs.commit_message }}
+      run: |
         git add -A
 
-        if ! git commit -s -F "$MIGRATION_COMMIT_MESSAGE_FILE" --cleanup=verbatim; then
+        if ! git commit -s -m "$COMMIT_MESSAGE" --cleanup=verbatim; then
           echo "::error::git commit failed — migration changes were not committed."
           exit 1
         fi
 
         echo "commit_made=true" >>"$GITHUB_OUTPUT"
 
-    # ── 12. Push migration changes ─────────────────────────────────────
+    # ── 13. Commit migration changes (GraphQL path) ─────────────────────
+    - name: Commit migration changes (GraphQL)
+      if: >-
+        steps.run-migration.outputs.migration_ran == 'true'
+        && inputs.sign-commits == 'true'
+        && steps.build-commit-message.outputs.has_changes == 'true'
+      id: commit-migration-graphql
+      uses: planetscale/ghcommit-action@25309d8005ac7c3bcd61d3fe19b69e0fe47dbdde  # v0.2.20
+      env:
+        GITHUB_TOKEN: ${{ inputs.token || github.token }}
+      with:
+        commit_message: ${{ steps.build-commit-message.outputs.commit_message }}
+        repo: ${{ github.repository }}
+        branch: ${{ github.event.pull_request.head.ref }}
+
+    # ── 14. Record commit result ────────────────────────────────────────
+    - name: Record commit result
+      if: >-
+        steps.run-migration.outputs.migration_ran == 'true'
+      id: commit-result
+      shell: bash
+      env:
+        SIGN_COMMITS: ${{ inputs.sign-commits }}
+        HAS_CHANGES: ${{ steps.build-commit-message.outputs.has_changes }}
+        LOCAL_COMMIT_MADE: ${{ steps.commit-migration-local.outputs.commit_made }}
+        GRAPHQL_COMMIT_HASH: ${{ steps.commit-migration-graphql.outputs.commit-hash }}
+      run: |
+        if [ "$HAS_CHANGES" != "true" ]; then
+          echo "No migration changes to commit."
+          echo "commit_made=false" >>"$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if [ "$SIGN_COMMITS" = "true" ] \
+            && [ -n "$GRAPHQL_COMMIT_HASH" ]; then
+          echo "commit_made=true" >>"$GITHUB_OUTPUT"
+        elif [ "$SIGN_COMMITS" != "true" ] \
+            && [ "$LOCAL_COMMIT_MADE" = "true" ]; then
+          echo "commit_made=true" >>"$GITHUB_OUTPUT"
+        else
+          echo "commit_made=false" >>"$GITHUB_OUTPUT"
+        fi
+
+    # ── 15. Push migration changes (local git path) ─────────────────────
     #
     # Uses `token` when available (needed for workflow-write permission
     # if the migration modified .github/workflows/* files).  Falls back
@@ -544,7 +620,8 @@ runs:
     # as long as no workflow files were changed.
     - name: Push migration changes
       if: >-
-        steps.commit-migration.outputs.commit_made == 'true'
+        steps.commit-result.outputs.commit_made == 'true'
+        && inputs.sign-commits != 'true'
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token || github.token }}
@@ -559,7 +636,7 @@ runs:
           exit 1
         fi
 
-    # ── 13. Build the migration report ─────────────────────────────────
+    # ── 16. Build the migration report ──────────────────────────────────
     - name: Build migration report
       if: >-
         steps.run-migration.outputs.migration_ran == 'true'
@@ -570,7 +647,7 @@ runs:
         NEW_VERSION: ${{ steps.check-update.outputs.new_version }}
         OVERALL_EXIT: ${{ steps.run-migration.outputs.overall_exit }}
         REPORT: ${{ steps.run-migration.outputs.report }}
-        COMMIT_MADE: ${{ steps.commit-migration.outputs.commit_made }}
+        COMMIT_MADE: ${{ steps.commit-result.outputs.commit_made }}
         AUTO_MERGE_ON_CHANGES: ${{ inputs.auto-merge-on-changes }}
         TOKEN_PROVIDED: ${{ inputs.token != '' }}
         INTERVENTION_PENDING_LABEL: ${{ inputs.intervention-pending-label }}
@@ -579,7 +656,7 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
       run: "${ACTION_PATH}/scripts/build-report.sh"
 
-    # ── 14. Write job summary ──────────────────────────────────────────
+    # ── 17. Write job summary ───────────────────────────────────────────
     - name: Write job summary
       if: >-
         steps.run-migration.outputs.migration_ran == 'true'
@@ -588,11 +665,11 @@ runs:
         SUMMARY: ${{ steps.migration-report.outputs.summary }}
       run: echo "$SUMMARY" >>"$GITHUB_STEP_SUMMARY"
 
-    # ── 15. Post PR comment ──────────────────────────────────────────
+    # ── 18. Post PR comment ─────────────────────────────────────────────
     #
     # Uses continue-on-error so a comment failure (API rate limits,
     # transient network errors, etc.) does not block labelling or the
-    # intervention check.  The job summary (step 14) already provides
+    # intervention check.  The job summary (step 17) already provides
     # the same information.
     - name: Post PR comment
       if: >-
@@ -606,7 +683,7 @@ runs:
         SUMMARY: ${{ steps.migration-report.outputs.summary }}
       run: gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$SUMMARY"
 
-    # ── 16. Label the PR ──────────────────────────────────────────────
+    # ── 19. Label the PR ────────────────────────────────────────────────
     #
     # Runs with `always()` so that labels are set even if a prior
     # non-critical step fails.  Only gated on `migration_ran` to
@@ -656,7 +733,7 @@ runs:
         LABEL_DESCRIPTION="$LABEL_MIGRATED_DESCRIPTION" \
           "${ACTION_PATH}/scripts/add-label.sh"
 
-    # ── 17. Fail if intervention is needed ────────────────────────────
+    # ── 20. Fail if intervention is needed ──────────────────────────────
     #
     # Runs with `always()` so it executes even if a prior non-critical
     # step failed.  This prevents the PR from being auto-merged while
@@ -691,13 +768,13 @@ runs:
         echo "::error::Migration requires manual intervention. See the PR comment for details."
         exit 1
 
-    # ── 18. Approve and auto-merge (no intervention needed) ────────────
+    # ── 21. Approve and auto-merge (no intervention needed) ─────────────
     - name: Approve and auto-merge
       if: >-
         inputs.token != ''
         && steps.run-migration.outputs.migration_ran == 'true'
         && steps.run-migration.outputs.overall_exit == '0'
-        && (steps.commit-migration.outputs.commit_made != 'true'
+        && (steps.commit-result.outputs.commit_made != 'true'
             || inputs.auto-merge-on-changes == 'true')
       shell: bash
       env:
@@ -725,7 +802,7 @@ runs:
         LABEL_DESCRIPTION="$AUTO_MERGED_LABEL_DESCRIPTION" \
           "${ACTION_PATH}/scripts/add-label.sh"
 
-    # ── 19. Handle patch-only updates ───────────────────────────────────
+    # ── 22. Handle patch-only updates ───────────────────────────────────
     #
     # For patch-only updates we either auto-merge (when token is provided)
     # or post a guidance comment and leave merge/approval to a human.
