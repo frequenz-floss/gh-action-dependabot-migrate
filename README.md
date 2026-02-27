@@ -667,6 +667,21 @@ Label descriptions are configurable via
 `intervention-done-label-description`, and
 `auto-merged-label-description`.
 
+## External actions
+
+This action depends on the following external actions:
+
+* [`dependabot/fetch-metadata`](https://github.com/dependabot/fetch-metadata):
+  Fetch Dependabot PR metadata (versions, update type, grouped dependencies)
+* [`actions/checkout`](https://github.com/actions/checkout): Check out the PR
+  branch so migration scripts can modify files
+* [`actions/setup-python`](https://github.com/actions/setup-python): Provide
+  the Python interpreter for migration scripts
+* [`frequenz-floss/gh-action-setup-git`](https://github.com/frequenz-floss/gh-action-setup-git):
+  Configure Git identity for local commits
+* [`planetscale/ghcommit-action`](https://github.com/planetscale/ghcommit-action):
+  Create verified commits via GraphQL when `sign-commits: "true"`
+
 ## Development
 
 For contributor-focused development setup, linting, test workflow, and
