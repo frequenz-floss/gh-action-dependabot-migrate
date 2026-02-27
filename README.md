@@ -141,7 +141,7 @@ permissions:
 jobs:
   migrate:
     if: contains(github.event.pull_request.title, 'the my-tool group')
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-24.04
     steps:
       - uses: frequenz-floss/gh-action-dependabot-migrate@<sha>  # <version>
         with:
@@ -158,7 +158,7 @@ for the full workflow):
 jobs:
   migrate:
     if: contains(github.event.pull_request.title, 'the my-tool group')
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-24.04
     steps:
       - name: Generate token
         id: token
@@ -225,6 +225,9 @@ jobs:
 ### Requirements
 
 For the action to function correctly, the calling repository must have:
+
+* **A runner image that supports Docker**, for example `ubuntu-24.04`
+  (`ubuntu-slim` is not supported as it does not include Docker).
 
 * **Auto-merge enabled** in the repository settings (Settings > General >
   Pull Requests > Allow auto-merge) — only needed when using `token` for
@@ -470,7 +473,7 @@ permissions:
 jobs:
   migrate:
     if: contains(github.event.pull_request.title, 'the my-tool group')
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-24.04
     steps:
       - uses: frequenz-floss/gh-action-dependabot-migrate@<sha>  # <version>
         with:
@@ -494,7 +497,7 @@ permissions:
 jobs:
   migrate:
     if: contains(github.event.pull_request.title, 'the my-tool group')
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-24.04
     steps:
       - name: Generate token
         id: token
@@ -541,7 +544,7 @@ permissions:
 jobs:
   migrate:
     if: contains(github.event.pull_request.title, 'the my-tool group')
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-24.04
     steps:
       - name: Generate token
         id: token
@@ -613,7 +616,7 @@ permissions:
 jobs:
   migrate:
     if: contains(github.event.pull_request.title, 'the my-tool group')
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-24.04
     steps:
       - name: Generate token
         id: token

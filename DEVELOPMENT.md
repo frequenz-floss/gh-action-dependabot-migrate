@@ -112,8 +112,7 @@ downloaded migration scripts without network access.
 
 ## CI workflow
 
-CI is defined in `.github/workflows/ci.yaml` and runs on `ubuntu-slim`.
-It has separate jobs for:
+CI is defined in `.github/workflows/ci.yaml`. It has separate jobs for:
 
 - ShellCheck
 - actionlint
