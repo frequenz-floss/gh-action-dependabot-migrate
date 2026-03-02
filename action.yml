@@ -1,0 +1,828 @@
+# License: MIT
+# Copyright © 2026 Frequenz Energy-as-a-Service GmbH
+---
+#
+# Dependabot Migrate — Composite Action
+#
+# A GitHub Action for running migration scripts on Dependabot PRs.
+# Workflows using this action provide a script URL template and
+# configure labels/behaviour via inputs.
+#
+# Architecture notes:
+#
+# - The workflow using this action uses pull_request_target (not
+#   pull_request) because
+#   Dependabot PRs are treated as fork PRs: GITHUB_TOKEN is read-only
+#   and secrets are unavailable with a plain pull_request trigger.
+#   pull_request_target provides write access and secrets, and always
+#   loads the workflow YAML from the base branch (immune to PR
+#   tampering).
+#
+# - The workflow using this action provides triggers, permissions,
+#   runs-on, the title-based `if` condition, and token inputs.  All
+#   migration logic lives here.
+#
+# - The workflow's `if` checks only the PR title (not github.actor),
+#   because label events from humans would be blocked by an actor
+#   check.  Actor checks are on steps 5, 6, and 22 instead.
+#
+# - Steps 5, 6, and 22 also exclude labeled/unlabeled events because
+#   Dependabot adds labels (e.g. "dependencies") immediately after
+#   opening a PR, which would trigger a second parallel run that races
+#   with the opened event.  Label events are only relevant for
+#   intervention resolution (step 3).
+#
+# - Receives the workflow's `github` context (event, actor, etc.).
+#
+# - Dependabot's github-actions ecosystem updates the workflow's `uses:`
+#   version reference.  Those PRs have "the compatible group" in the
+#   title, which does NOT match the workflow's `if` condition.
+#
+# Token model:
+#
+#   GITHUB_TOKEN (automatic) — labels, comments, metadata, checkout.
+#     Also used as the push-token fallback when `token` is not
+#     provided.
+#
+#   token (optional input) — push migration commits (overriding the
+#     GITHUB_TOKEN fallback), approve, and enable auto-merge.  The
+#     workflow is responsible for generating this token (e.g. from
+#     GitHub App credentials via actions/create-github-app-token, or a
+#     PAT stored as a secret).  Must trigger follow-up workflows
+#     (merge queue CI, etc.).  When omitted, there is no auto-approve
+#     or auto-merge.  When `sign-commits` is enabled, this token is
+#     also used for the GraphQL commit API call.
+#
+#   migration-token (optional input) — exposed to migration scripts
+#     as GITHUB_TOKEN and GH_TOKEN.  When omitted, the migration
+#     script runs with no GitHub credentials at all.
+#
+# Step overview:
+#
+#   1. Validate inputs                    – fail-fast on misconfigurations
+#   2. Determine current state from labels – read labels for status
+#   3. Handle intervention resolution     – normalise labels
+#   4. Short-circuit if already migrated  – skip re-triggers
+#   5. Fetch Dependabot metadata          – versions, update type, group (gated)
+#   6. Decide whether migration needed    – resolve versions, decide (gated)
+#   7. Checkout PR branch                 – for file modifications
+#   8. Set up Python                      – for running the migration script
+#   9. Run the migration script(s)        – execute per-version scripts
+#  10. Set up Git                         – just before commit
+#  11. Build commit message               – shared by local and GraphQL commit paths
+#  12. Commit migration changes (local)   – local git commit path
+#  13. Commit migration changes (GraphQL) – GraphQL API commit path
+#  14. Record commit result               – normalise commit_made output
+#  15. Push migration changes             – local git path only
+#  16. Build the migration report         – generate Markdown summary
+#  17. Write job summary                  – append summary to $GITHUB_STEP_SUMMARY
+#  18. Post PR comment                    – continue-on-error
+#  19. Label the PR                       – always(), gated on migration_ran
+#  20. Fail if intervention is needed     – always(), blocks merge
+#  21. Approve and auto-merge             – clean migration only
+#  22. Handle patch-only updates          – auto-merge with token,
+#                                           otherwise instruct manual review
+#
+# Label ordering (step 19): intervention-pending-label is added BEFORE
+# migrated-label.  If interrupted between the two API calls, the PR
+# stays in a safe state (no migrated label → migration re-runs) rather
+# than a dangerous one (migrated without pending → looks clean).
+#
+# Reliability: step 9 writes migration outputs (overall_exit, report) before
+# any git operations.  Commit and push are explicit steps (11-15), so
+# permission/authentication failures are easier to diagnose.  Checkout runs
+# with persist-credentials disabled, and only the push step receives
+# token-backed git credentials. Step 18 (PR comment) uses continue-on-error so
+# a posting failure does not block labels or the intervention check.  Steps 19
+# and 20 use always() so they run even if a prior non-critical step fails.
+
+name: Dependabot Migrate
+description: >-
+  Run migration scripts on Dependabot PRs — fetch and execute
+  per-version scripts, commit changes, post a summary, and optionally
+  auto-approve and auto-merge.
+
+inputs:
+  script-url-template:
+    description: >-
+      URL template for the migration script.  Use {version} as a
+      placeholder for the version tag (e.g. v0.15.0).
+    required: true
+  token:
+    description: >-
+      Token used for pushing migration commits, PR approval, and
+      auto-merge.  Must trigger follow-up workflows (merge queue
+      CI, etc.) — typically a GitHub App token or PAT, since
+      GITHUB_TOKEN does not trigger follow-up workflows.  If the
+      migration can modify workflow files (.github/workflows/*),
+      this token also needs workflow-write permission.  When
+      omitted, migration commits are pushed with GITHUB_TOKEN and
+      no auto-approve or auto-merge is performed.  The workflow is
+      responsible for generating this token (e.g. via
+      actions/create-github-app-token in a prior step).  When
+      `sign-commits` is "true", this token is also used for
+      GraphQL `createCommitOnBranch` commit creation.
+    required: false
+    default: ""
+  sign-commits:
+    description: >-
+      When "true", create migration commits via GitHub's GraphQL
+      `createCommitOnBranch` mutation so commits are marked as verified
+      when supported (for example with GitHub App tokens).  When
+      "false" (default), use local `git commit` and `git push`.
+    required: false
+    default: "false"
+  migration-token:
+    description: >-
+      Token exposed to migration scripts as GITHUB_TOKEN and
+      GH_TOKEN.  When omitted, the migration script runs with no
+      GitHub credentials at all.  The workflow is responsible for
+      generating this token if needed.
+    required: false
+    default: ""
+  auto-merge-on-changes:
+    description: >-
+      When "true", auto-approve and auto-merge even when the migration
+      produced commits.  When "false" (default), auto-merge is only
+      enabled for patch-only updates and migrations that produce no
+      file changes; migration commits require a human review.
+      Requires `token` to be set.
+    required: false
+    default: "false"
+  report-title:
+    description: >-
+      Heading used for PR comments and job summaries emitted by
+      this action.  Do not include Markdown heading markers.
+      When empty, the calling workflow title is used.
+    required: false
+    default: ""
+  iterate-v0-minors:
+    description: >-
+      When "true" (default), v0.x bumps iterate through each
+      intermediate minor version.  When "false", only the target
+      version is run.
+    required: false
+    default: "true"
+  python-version:
+    description: >-
+      Python version to use for running the migration script.
+    required: false
+    default: "3.14"
+  expected-actor:
+    description: >-
+      GitHub actor whose pull requests trigger migration and
+      auto-approval.  Used to distinguish bot-triggered events
+      (Dependabot opens or synchronises a PR) from human-triggered
+      label events (intervention resolution).  Steps gated by this
+      check: Dependabot metadata fetch (step 5), migration decision
+      (step 6), and patch-only auto-approval (step 22).
+    required: false
+    default: "dependabot[bot]"
+  migrated-label:
+    description: >-
+      Label name used to mark that migration has run.
+    required: false
+    default: "migrated"
+  migrated-label-color:
+    description: >-
+      Hex colour to use if the migrated-label needs to be created
+      (#RRGGBB).
+    required: false
+    default: "#2B8383"
+  migrated-label-description:
+    description: >-
+      Label description to use if the migrated-label needs to be
+      created.
+    required: false
+    default: "Migration script has been run"
+  intervention-pending-label:
+    description: >-
+      Label name used when migration requires manual intervention.
+    required: false
+    default: "intervention-pending"
+  intervention-pending-label-color:
+    description: >-
+      Hex colour to use if the intervention-pending-label needs to be
+      created (#RRGGBB).
+    required: false
+    default: "#DE36AD"
+  intervention-pending-label-description:
+    description: >-
+      Label description to use if the intervention-pending-label
+      needs to be created.
+    required: false
+    default: "Migration requires manual intervention"
+  intervention-done-label:
+    description: >-
+      Label name used when manual intervention is completed.
+    required: false
+    default: "intervention-done"
+  intervention-done-label-color:
+    description: >-
+      Hex colour to use if the intervention-done-label needs to be
+      created (#RRGGBB).
+    required: false
+    default: "#0E8A16"
+  intervention-done-label-description:
+    description: >-
+      Label description to use if the intervention-done-label
+      needs to be created.
+    required: false
+    default: "Manual migration intervention has been completed"
+  auto-merged-label:
+    description: >-
+      Label name used when this action enables auto-merge.
+    required: false
+    default: "auto-merged"
+  auto-merged-label-color:
+    description: >-
+      Hex colour to use if the auto-merged-label needs to be created
+      (#RRGGBB).
+    required: false
+    default: "#0E8A16"
+  auto-merged-label-description:
+    description: >-
+      Label description to use if the auto-merged-label needs to be
+      created.
+    required: false
+    default: "PR was auto-merged by automation"
+
+outputs:
+  migration_ran:
+    description: Whether the migration script(s) executed.
+    value: ${{ steps.run-migration.outputs.migration_ran }}
+  overall_exit:
+    description: >-
+      Consolidated exit code: "0" if all scripts succeeded, "1" if
+      any required intervention.
+    value: ${{ steps.run-migration.outputs.overall_exit }}
+  needs_migration:
+    description: >-
+      Whether a migration was needed: "true" for minor/major bumps,
+      "false" for patch-only.
+    value: ${{ steps.check-update.outputs.needs_migration }}
+  commit_made:
+    description: Whether the migration produced a commit.
+    value: ${{ steps.commit-result.outputs.commit_made }}
+
+runs:
+  using: composite
+  steps:
+    # ── 1. Validate inputs ─────────────────────────────────────────────
+    #
+    # Fail fast if the workflow set `auto-merge-on-changes` but forgot to
+    # provide the `token` needed for approval and merging.
+    - name: Validate inputs
+      id: validate-inputs
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.token }}
+        AUTO_MERGE_ON_CHANGES: ${{ inputs.auto-merge-on-changes }}
+      run: |
+        if [ "$AUTO_MERGE_ON_CHANGES" = "true" ] \
+            && [ -z "$TOKEN" ]; then
+          echo "::error::\`auto-merge-on-changes\` requires the \`token\` input."
+          exit 1
+        fi
+
+    # ── 2. Determine current state from PR labels ──────────────────────
+    #
+    # Read the PR labels to figure out whether the migration has already
+    # been run and whether there is still pending intervention.
+    - name: Check migration status
+      id: check-status
+      shell: bash
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ github.token }}
+        LABEL_MIGRATED: ${{ inputs.migrated-label }}
+        LABEL_PENDING: ${{ inputs.intervention-pending-label }}
+      run: |
+        LABELS=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels -q '.labels[].name')
+
+        if echo "$LABELS" | grep -qxF "$LABEL_MIGRATED"; then
+          echo "already_migrated=true" >>"$GITHUB_OUTPUT"
+        else
+          echo "already_migrated=false" >>"$GITHUB_OUTPUT"
+        fi
+
+        if echo "$LABELS" | grep -qxF "$LABEL_PENDING"; then
+          echo "intervention_pending=true" >>"$GITHUB_OUTPUT"
+        else
+          echo "intervention_pending=false" >>"$GITHUB_OUTPUT"
+        fi
+
+    # ── 3. Handle intervention label changes ───────────────────────────
+    #
+    # The user can signal that intervention is done in two ways:
+    #   a. Remove the intervention-pending-label.
+    #   b. Add the intervention-done-label.
+    #
+    # Users can also mark intervention as pending again by adding the
+    # intervention-pending-label.
+    #
+    # This step handles intervention label transitions and posts
+    # next-step instructions:
+    #   a. Resolve intervention (remove pending, add done).
+    #   b. Mark intervention as needed again (remove done).
+    #
+    # Removing the intervention-done-label is also treated as
+    # undoing the completion signal and fails intentionally.
+    - name: Handle intervention labels
+      id: handle-intervention
+      if: >-
+        steps.check-status.outputs.already_migrated == 'true'
+        && (
+          (github.event.action == 'labeled'
+           && github.event.label.name == inputs.intervention-pending-label)
+          ||
+          (github.event.action == 'unlabeled'
+           && github.event.label.name == inputs.intervention-pending-label)
+          || (github.event.action == 'labeled'
+              && github.event.label.name == inputs.intervention-done-label)
+          || (github.event.action == 'unlabeled'
+              && github.event.label.name == inputs.intervention-done-label)
+        )
+      shell: bash
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ github.token }}
+        EVENT_ACTION: ${{ github.event.action }}
+        EVENT_LABEL: ${{ github.event.label.name }}
+        LABEL_PENDING: ${{ inputs.intervention-pending-label }}
+        LABEL_PENDING_COLOR: ${{ inputs.intervention-pending-label-color }}
+        LABEL_PENDING_DESCRIPTION: >-
+          ${{ inputs.intervention-pending-label-description }}
+        LABEL_DONE: ${{ inputs.intervention-done-label }}
+        LABEL_DONE_COLOR: ${{ inputs.intervention-done-label-color }}
+        LABEL_DONE_DESCRIPTION: >-
+          ${{ inputs.intervention-done-label-description }}
+        AUTO_MERGE_ON_CHANGES: ${{ inputs.auto-merge-on-changes }}
+        REPORT_TITLE: ${{ inputs.report-title || github.workflow }}
+      run: "${{ github.action_path }}/scripts/handle-intervention.sh"
+
+    # ── 4. Short-circuit when migration already ran ────────────────────
+    #
+    # This covers two cases: intervention is still pending, or this
+    # is a re-trigger (e.g. synchronize) after migration already ran.
+    - name: Skip if already migrated
+      if: >-
+        steps.check-status.outputs.already_migrated == 'true'
+      shell: bash
+      run: |
+        echo "Migration already ran. Nothing more to do on this trigger."
+
+    # ── 5. Fetch Dependabot metadata (versions, update type, group) ────
+    #
+    # Only runs for the expected actor's PRs — human-triggered events
+    # (label changes) are handled by steps 2-3 above and short-circuited
+    # by step 4.
+    #
+    # Label events are excluded because Dependabot adds labels (e.g.
+    # "dependencies") immediately after opening a PR, which would
+    # trigger a second parallel run that races with the opened event.
+    # Label events are only relevant for intervention resolution
+    # (step 3).
+    - name: Fetch Dependabot metadata
+      if: >-
+        steps.check-status.outputs.already_migrated == 'false'
+        && github.actor == inputs.expected-actor
+        && github.event.action != 'labeled'
+        && github.event.action != 'unlabeled'
+      id: dependabot-metadata
+      # We pin a main-branch commit because v2.5.0 missed the grouped-
+      # update version fix, which left updated-dependencies-json incomplete.
+      # See:
+      # https://github.com/dependabot/fetch-metadata/issues/402
+      uses: dependabot/fetch-metadata@87f7a48f2fabdf8dacb5ac1853815db156399fe1  # main
+
+    # ── 6. Decide whether a migration is needed ────────────────────────
+    #
+    # Patch-only bumps never need migration.  Versions are resolved
+    # from updated-dependencies-json for both single and grouped
+    # updates.
+    - name: Check update type
+      if: >-
+        steps.check-status.outputs.already_migrated == 'false'
+        && github.actor == inputs.expected-actor
+        && github.event.action != 'labeled'
+        && github.event.action != 'unlabeled'
+      id: check-update
+      shell: bash
+      env:
+        UPDATE_TYPE: ${{ steps.dependabot-metadata.outputs.update-type }}
+        DEPS_JSON: ${{ steps.dependabot-metadata.outputs.updated-dependencies-json }}
+      run: |
+        if ! command -v jq >/dev/null 2>&1; then
+          echo "::error::jq is required to parse updated-dependencies-json."
+          exit 1
+        fi
+
+        OLD_VERSIONS=$(echo "$DEPS_JSON" \
+          | jq -r '.[].prevVersion | select(. != "" and . != null)')
+        NEW_VERSIONS=$(echo "$DEPS_JSON" \
+          | jq -r '.[].newVersion | select(. != "" and . != null)')
+
+        if [ -z "$OLD_VERSIONS" ] || [ -z "$NEW_VERSIONS" ]; then
+          echo "::error::Could not resolve versions from updated-dependencies-json."
+          echo "::error::updated-dependencies-json: $DEPS_JSON"
+          exit 1
+        fi
+
+        OLD_VERSION=$(echo "$OLD_VERSIONS" | sort -V | head -1)
+        NEW_VERSION=$(echo "$NEW_VERSIONS" | sort -V | tail -1)
+        echo "Resolved update range: ${OLD_VERSION} → ${NEW_VERSION}"
+
+        if [ -z "$UPDATE_TYPE" ]; then
+          if echo "$DEPS_JSON" \
+            | jq -e '.[] | select(.updateType == "version-update:semver-major")' \
+              >/dev/null; then
+            UPDATE_TYPE="version-update:semver-major"
+          elif echo "$DEPS_JSON" \
+            | jq -e '.[] | select(.updateType == "version-update:semver-minor")' \
+              >/dev/null; then
+            UPDATE_TYPE="version-update:semver-minor"
+          else
+            UPDATE_TYPE="version-update:semver-patch"
+          fi
+        fi
+
+        {
+          echo "update_type=$UPDATE_TYPE"
+          echo "old_version=$OLD_VERSION"
+          echo "new_version=$NEW_VERSION"
+        } >>"$GITHUB_OUTPUT"
+
+        if [ "$UPDATE_TYPE" = "version-update:semver-patch" ]; then
+          echo "needs_migration=false" >>"$GITHUB_OUTPUT"
+          echo "Patch update only — no migration needed."
+        else
+          echo "needs_migration=true" >>"$GITHUB_OUTPUT"
+        fi
+
+    # ── 7. Checkout the PR branch so the migration can modify files ────
+    - name: Checkout PR branch
+      if: >-
+        steps.check-status.outputs.already_migrated == 'false'
+        && steps.check-update.outputs.needs_migration == 'true'
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      with:
+        ref: ${{ github.event.pull_request.head.ref }}
+        fetch-depth: 0
+        submodules: true
+        persist-credentials: false
+
+    # ── 8. Set up Python for running the migration script ──────────────
+    - name: Set up Python
+      if: >-
+        steps.check-status.outputs.already_migrated == 'false'
+        && steps.check-update.outputs.needs_migration == 'true'
+      uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    # ── 9. Run the migration script(s) ─────────────────────────────────
+    - name: Run migration
+      if: >-
+        steps.check-status.outputs.already_migrated == 'false'
+        && steps.check-update.outputs.needs_migration == 'true'
+      id: run-migration
+      shell: bash
+      env:
+        OLD_VERSION: ${{ steps.check-update.outputs.old_version }}
+        NEW_VERSION: ${{ steps.check-update.outputs.new_version }}
+        SCRIPT_URL_TEMPLATE: ${{ inputs.script-url-template }}
+        ITERATE_V0_MINORS: ${{ inputs.iterate-v0-minors }}
+        MIGRATION_TOKEN_INPUT: ${{ inputs.migration-token }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: "${ACTION_PATH}/scripts/run-migration.sh"
+
+    # ── 10. Set up Git for committing migration changes ────────────────
+    - name: Set up Git
+      if: >-
+        steps.run-migration.outputs.migration_ran == 'true'
+      uses: frequenz-floss/gh-action-setup-git@f9d86a01228ee1cadaac5224d4d7626f1eb23f90  # v1.0.0
+
+    # ── 11. Build commit message ────────────────────────────────────────
+    #
+    # Shared by both commit paths.
+    - name: Build commit message
+      if: >-
+        steps.run-migration.outputs.migration_ran == 'true'
+      id: build-commit-message
+      shell: bash
+      env:
+        OLD_VERSION: ${{ steps.check-update.outputs.old_version }}
+        NEW_VERSION: ${{ steps.check-update.outputs.new_version }}
+        OVERALL_EXIT: ${{ steps.run-migration.outputs.overall_exit }}
+        MIGRATION_REPORT: ${{ steps.run-migration.outputs.report }}
+      run: |
+        if [ -z "$(git status --porcelain)" ]; then
+          echo "No migration changes to commit."
+          echo "has_changes=false" >>"$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "has_changes=true" >>"$GITHUB_OUTPUT"
+
+        HEADLINE=$(printf 'Apply migration from %s to %s' \
+          "$OLD_VERSION" "$NEW_VERSION")
+
+        if [ -z "$MIGRATION_REPORT" ]; then
+          echo "::warning::run-migration did not provide a migration report"
+          BODY="The migration didn't produce any output."
+        else
+          BODY="$MIGRATION_REPORT"
+        fi
+
+        if [ "$OVERALL_EXIT" = "0" ]; then
+          FOOTER="The migration completed successfully."
+        else
+          FOOTER="The migration completed but requires manual intervention."
+        fi
+
+        {
+          echo "commit_message<<__COMMIT_MESSAGE_EOF__"
+          printf '%s\n\n%s\n\n%s\n' "$HEADLINE" "$BODY" "$FOOTER"
+          echo "__COMMIT_MESSAGE_EOF__"
+        } >>"$GITHUB_OUTPUT"
+
+    # ── 12. Commit migration changes (local git path) ───────────────────
+    - name: Commit migration changes (local git)
+      if: >-
+        steps.run-migration.outputs.migration_ran == 'true'
+        && inputs.sign-commits != 'true'
+        && steps.build-commit-message.outputs.has_changes == 'true'
+      id: commit-migration-local
+      shell: bash
+      env:
+        COMMIT_MESSAGE: ${{ steps.build-commit-message.outputs.commit_message }}
+      run: |
+        git add -A
+
+        if ! git commit -s -m "$COMMIT_MESSAGE" --cleanup=verbatim; then
+          echo "::error::git commit failed — migration changes were not committed."
+          exit 1
+        fi
+
+        echo "commit_made=true" >>"$GITHUB_OUTPUT"
+
+    # ── 13. Commit migration changes (GraphQL path) ─────────────────────
+    - name: Commit migration changes (GraphQL)
+      if: >-
+        steps.run-migration.outputs.migration_ran == 'true'
+        && inputs.sign-commits == 'true'
+        && steps.build-commit-message.outputs.has_changes == 'true'
+      id: commit-migration-graphql
+      uses: planetscale/ghcommit-action@25309d8005ac7c3bcd61d3fe19b69e0fe47dbdde  # v0.2.20
+      env:
+        GITHUB_TOKEN: ${{ inputs.token || github.token }}
+      with:
+        commit_message: ${{ steps.build-commit-message.outputs.commit_message }}
+        repo: ${{ github.repository }}
+        branch: ${{ github.event.pull_request.head.ref }}
+
+    # ── 14. Record commit result ────────────────────────────────────────
+    - name: Record commit result
+      if: >-
+        steps.run-migration.outputs.migration_ran == 'true'
+      id: commit-result
+      shell: bash
+      env:
+        SIGN_COMMITS: ${{ inputs.sign-commits }}
+        HAS_CHANGES: ${{ steps.build-commit-message.outputs.has_changes }}
+        LOCAL_COMMIT_MADE: ${{ steps.commit-migration-local.outputs.commit_made }}
+        GRAPHQL_COMMIT_HASH: ${{ steps.commit-migration-graphql.outputs.commit-hash }}
+      run: |
+        if [ "$HAS_CHANGES" != "true" ]; then
+          echo "No migration changes to commit."
+          echo "commit_made=false" >>"$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if [ "$SIGN_COMMITS" = "true" ] \
+            && [ -n "$GRAPHQL_COMMIT_HASH" ]; then
+          echo "commit_made=true" >>"$GITHUB_OUTPUT"
+        elif [ "$SIGN_COMMITS" != "true" ] \
+            && [ "$LOCAL_COMMIT_MADE" = "true" ]; then
+          echo "commit_made=true" >>"$GITHUB_OUTPUT"
+        else
+          echo "commit_made=false" >>"$GITHUB_OUTPUT"
+        fi
+
+    # ── 15. Push migration changes (local git path) ─────────────────────
+    #
+    # Uses `token` when available (needed for workflow-write permission
+    # if the migration modified .github/workflows/* files).  Falls back
+    # to GITHUB_TOKEN, which is sufficient for pushing to PR branches
+    # as long as no workflow files were changed.
+    - name: Push migration changes
+      if: >-
+        steps.commit-result.outputs.commit_made == 'true'
+        && inputs.sign-commits != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token || github.token }}
+        PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+      run: |
+        gh auth setup-git
+
+        if ! git push origin "HEAD:${PR_HEAD_REF}"; then
+          echo "::error::git push failed — migration changes were not pushed."
+          echo "::error::If the error mentions workflow files (.github/workflows/*)," \
+            "provide a token with Workflows write permission."
+          exit 1
+        fi
+
+    # ── 16. Build the migration report ──────────────────────────────────
+    - name: Build migration report
+      if: >-
+        steps.run-migration.outputs.migration_ran == 'true'
+      id: migration-report
+      shell: bash
+      env:
+        OLD_VERSION: ${{ steps.check-update.outputs.old_version }}
+        NEW_VERSION: ${{ steps.check-update.outputs.new_version }}
+        OVERALL_EXIT: ${{ steps.run-migration.outputs.overall_exit }}
+        REPORT: ${{ steps.run-migration.outputs.report }}
+        COMMIT_MADE: ${{ steps.commit-result.outputs.commit_made }}
+        AUTO_MERGE_ON_CHANGES: ${{ inputs.auto-merge-on-changes }}
+        TOKEN_PROVIDED: ${{ inputs.token != '' }}
+        INTERVENTION_PENDING_LABEL: ${{ inputs.intervention-pending-label }}
+        INTERVENTION_DONE_LABEL: ${{ inputs.intervention-done-label }}
+        REPORT_TITLE: ${{ inputs.report-title || github.workflow }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: "${ACTION_PATH}/scripts/build-report.sh"
+
+    # ── 17. Write job summary ───────────────────────────────────────────
+    - name: Write job summary
+      if: >-
+        steps.run-migration.outputs.migration_ran == 'true'
+      shell: bash
+      env:
+        SUMMARY: ${{ steps.migration-report.outputs.summary }}
+      run: echo "$SUMMARY" >>"$GITHUB_STEP_SUMMARY"
+
+    # ── 18. Post PR comment ─────────────────────────────────────────────
+    #
+    # Uses continue-on-error so a comment failure (API rate limits,
+    # transient network errors, etc.) does not block labelling or the
+    # intervention check.  The job summary (step 17) already provides
+    # the same information.
+    - name: Post PR comment
+      if: >-
+        steps.run-migration.outputs.migration_ran == 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ github.token }}
+        SUMMARY: ${{ steps.migration-report.outputs.summary }}
+      run: gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$SUMMARY"
+
+    # ── 19. Label the PR ────────────────────────────────────────────────
+    #
+    # Runs with `always()` so that labels are set even if a prior
+    # non-critical step fails.  Only gated on `migration_ran` to
+    # avoid labeling when the migration never actually executed.
+    #
+    # Label ordering matters: intervention-pending-label is added
+    # BEFORE migrated-label so that if the step is interrupted between
+    # the two API calls, the PR is left in a safe state.
+    - name: Add labels
+      if: >-
+        always()
+        && steps.run-migration.outputs.migration_ran == 'true'
+      shell: bash
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        OVERALL_EXIT: ${{ steps.run-migration.outputs.overall_exit }}
+        GH_TOKEN: ${{ github.token }}
+        ACTION_PATH: ${{ github.action_path }}
+        LABEL_MIGRATED: ${{ inputs.migrated-label }}
+        LABEL_MIGRATED_COLOR: ${{ inputs.migrated-label-color }}
+        LABEL_MIGRATED_DESCRIPTION: ${{ inputs.migrated-label-description }}
+        LABEL_PENDING: ${{ inputs.intervention-pending-label }}
+        LABEL_PENDING_COLOR: ${{ inputs.intervention-pending-label-color }}
+        LABEL_PENDING_DESCRIPTION: >-
+          ${{ inputs.intervention-pending-label-description }}
+        LABEL_DONE: ${{ inputs.intervention-done-label }}
+        LABEL_DONE_COLOR: ${{ inputs.intervention-done-label-color }}
+        LABEL_DONE_DESCRIPTION: >-
+          ${{ inputs.intervention-done-label-description }}
+      run: |
+        if [ "$OVERALL_EXIT" != "0" ]; then
+          LABEL_NAME="$LABEL_PENDING" \
+          LABEL_COLOR="$LABEL_PENDING_COLOR" \
+          LABEL_DESCRIPTION="$LABEL_PENDING_DESCRIPTION" \
+            "${ACTION_PATH}/scripts/add-label.sh"
+
+          # Pre-create the done label so it appears in the label picker.
+          LABEL_NAME="$LABEL_DONE" \
+          LABEL_COLOR="$LABEL_DONE_COLOR" \
+          LABEL_DESCRIPTION="$LABEL_DONE_DESCRIPTION" \
+            "${ACTION_PATH}/scripts/create-label.sh"
+        fi
+
+        LABEL_NAME="$LABEL_MIGRATED" \
+        LABEL_COLOR="$LABEL_MIGRATED_COLOR" \
+        LABEL_DESCRIPTION="$LABEL_MIGRATED_DESCRIPTION" \
+          "${ACTION_PATH}/scripts/add-label.sh"
+
+    # ── 20. Fail if intervention is needed ──────────────────────────────
+    #
+    # Runs with `always()` so it executes even if a prior non-critical
+    # step failed.  This prevents the PR from being auto-merged while
+    # intervention is still pending.
+    #
+    # Two cases:
+    #   a. Migration just ran and failed (overall_exit != 0).
+    #   b. Migration ran previously and intervention is still pending
+    #      (and this run did not just mark intervention as completed).
+    - name: Fail if intervention needed
+      if: >-
+        always()
+        && (
+          (steps.run-migration.outputs.migration_ran == 'true'
+           && steps.run-migration.outputs.overall_exit != '0')
+            || (
+              steps.check-status.outputs.already_migrated == 'true'
+              && steps.check-status.outputs.intervention_pending == 'true'
+              && !(
+                steps.handle-intervention.conclusion == 'success'
+                && (
+                  (github.event.action == 'unlabeled'
+                   && github.event.label.name == inputs.intervention-pending-label)
+                  || (github.event.action == 'labeled'
+                      && github.event.label.name == inputs.intervention-done-label)
+                )
+              )
+            )
+          )
+      shell: bash
+      run: |
+        echo "::error::Migration requires manual intervention. See the PR comment for details."
+        exit 1
+
+    # ── 21. Approve and auto-merge (no intervention needed) ─────────────
+    - name: Approve and auto-merge
+      if: >-
+        inputs.token != ''
+        && steps.run-migration.outputs.migration_ran == 'true'
+        && steps.run-migration.outputs.overall_exit == '0'
+        && (steps.commit-result.outputs.commit_made != 'true'
+            || inputs.auto-merge-on-changes == 'true')
+      shell: bash
+      env:
+        PR_URL: ${{ github.event.pull_request.html_url }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ inputs.token }}
+        ACTION_PATH: ${{ github.action_path }}
+        AUTO_MERGED_LABEL: ${{ inputs.auto-merged-label }}
+        AUTO_MERGED_LABEL_COLOR: ${{ inputs.auto-merged-label-color }}
+        AUTO_MERGED_LABEL_DESCRIPTION: >-
+          ${{ inputs.auto-merged-label-description }}
+        REPORT_TITLE: ${{ inputs.report-title || github.workflow }}
+      run: |
+        {
+          echo "## ${REPORT_TITLE}"
+          echo ""
+          echo "Migration completed successfully — PR approved and auto-merge enabled."
+        } >>"$GITHUB_STEP_SUMMARY"
+
+        gh pr review --approve "$PR_URL"
+        gh pr merge --auto --merge "$PR_URL"
+        LABEL_NAME="$AUTO_MERGED_LABEL" \
+        LABEL_COLOR="$AUTO_MERGED_LABEL_COLOR" \
+        LABEL_DESCRIPTION="$AUTO_MERGED_LABEL_DESCRIPTION" \
+          "${ACTION_PATH}/scripts/add-label.sh"
+
+    # ── 22. Handle patch-only updates ───────────────────────────────────
+    #
+    # For patch-only updates we either auto-merge (when token is provided)
+    # or post a guidance comment and leave merge/approval to a human.
+    - name: Handle patch update
+      if: >-
+        steps.check-status.outputs.already_migrated == 'false'
+        && steps.check-update.outputs.needs_migration == 'false'
+        && github.actor == inputs.expected-actor
+        && github.event.action != 'labeled'
+        && github.event.action != 'unlabeled'
+      shell: bash
+      env:
+        PR_URL: ${{ github.event.pull_request.html_url }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        GH_TOKEN: ${{ inputs.token || github.token }}
+        TOKEN: ${{ inputs.token }}
+        AUTO_MERGED_LABEL: ${{ inputs.auto-merged-label }}
+        AUTO_MERGED_LABEL_COLOR: ${{ inputs.auto-merged-label-color }}
+        AUTO_MERGED_LABEL_DESCRIPTION: >-
+          ${{ inputs.auto-merged-label-description }}
+        REPORT_TITLE: ${{ inputs.report-title || github.workflow }}
+      run: "${{ github.action_path }}/scripts/handle-patch-update.sh"

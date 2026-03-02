@@ -1,0 +1,133 @@
+# License: MIT
+# Copyright © 2026 Frequenz Energy-as-a-Service GmbH
+---
+name: CI
+
+on:
+  push:
+    branches: [v0.x.x]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# ═══════════════════════════════════════════════════════════════════
+jobs:
+  # ═══════════════════════════════════════════════════════════════════
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Run ShellCheck with reviewdog
+        uses: reviewdog/action-shellcheck@4c07458293ac342d477251099501a718ae5ef86e  # v1.32.0
+        with:
+          reporter: "github-check"
+          filter_mode: "nofilter"
+          fail_level: "any"
+          path: "."
+          pattern: "*.sh"
+
+  # ═══════════════════════════════════════════════════════════════════
+  actionlint:
+    name: Actionlint
+    # We can't use ubuntu-slim because it needs docker
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      # actionlint validates workflow files only.
+      # action.yml is covered by yamllint in the yamllint job.
+      - name: Run actionlint with reviewdog
+        uses: reviewdog/action-actionlint@0d952c597ef8459f634d7145b0b044a9699e5e43  # v1.71.0
+        with:
+          reporter: "github-check"
+          filter_mode: "nofilter"
+          fail_level: "any"
+          actionlint_flags: ".github/workflows/"
+
+  # ═══════════════════════════════════════════════════════════════════
+  yamllint:
+    name: Yamllint
+    # We can't use ubuntu-slim because it needs docker
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: Run yamllint with reviewdog
+        uses: reviewdog/action-yamllint@f01d8a48fd8d89f89895499fca2cff09f9e9e8c0  # v1.21.0
+        with:
+          reporter: "github-check"
+          filter_mode: "nofilter"
+          fail_level: "any"
+          yamllint_flags: >-
+            -c .yamllint.yaml
+            .github/workflows/
+            .github/dependabot.yml
+            action.yml
+            .yamllint.yaml
+
+  # ═══════════════════════════════════════════════════════════════════
+  unit-tests:
+    name: Unit tests
+    runs-on: ubuntu-slim
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          submodules: "recursive"
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.14"
+
+      - name: Run unit tests
+        run: tests/lib/bats-core/bin/bats tests/ --print-output-on-failure
+
+  # ═══════════════════════════════════════════════════════════════════
+  integration-test:
+    name: Integration test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      # Verify that auto-merge-on-changes=true without a token is
+      # rejected by the validate-inputs step (step 1 of the action).
+      - name: Test validate-inputs rejects missing token
+        id: test-missing-token
+        continue-on-error: true
+        uses: ./
+        with:
+          script-url-template: "https://example.com/{version}.py"
+          auto-merge-on-changes: "true"
+          token: ""
+
+      - name: Assert validation failure
+        env:
+          OUTCOME: ${{ steps.test-missing-token.outcome }}
+        run: |
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "::error::Expected action to fail when auto-merge-on-changes=true without token."
+            exit 1
+          fi
+          echo "Validation correctly rejected missing token."
