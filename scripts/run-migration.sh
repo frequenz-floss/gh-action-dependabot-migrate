@@ -77,20 +77,23 @@ Migration script not found (HTTP ${HTTP_CODE}).
     continue
   fi
 
+  # We use Python -I (isolate) mode to prevent the migration script from
+  # importing any modules (like `os.py`) from the current working directory,
+  # which is the checked out untrusted pull request code.
   if [ -n "$MIGRATION_TOKEN_INPUT" ]; then
     SCRIPT_OUTPUT=$(GITHUB_TOKEN="$MIGRATION_TOKEN_INPUT" \
       GH_TOKEN="$MIGRATION_TOKEN_INPUT" \
-      python3 "/tmp/migrate_${version}.py" 2>&1)
+      python3 -I "/tmp/migrate_${version}.py" 2>&1)
   else
     SCRIPT_OUTPUT=$(env -u GITHUB_TOKEN -u GH_TOKEN \
-      python3 "/tmp/migrate_${version}.py" 2>&1)
+      python3 -I "/tmp/migrate_${version}.py" 2>&1)
   fi
   EXIT_CODE=$?
 
   echo "$SCRIPT_OUTPUT"
 
   # Keep ANSI in logs, but sanitise for reports/commit messages.
-  CLEAN_OUTPUT=$(python3 -c 'import re, sys
+  CLEAN_OUTPUT=$(python3 -I -c 'import re, sys
 text = sys.stdin.read()
 sys.stdout.write(re.sub(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])", "", text))' <<<"$SCRIPT_OUTPUT")
 
