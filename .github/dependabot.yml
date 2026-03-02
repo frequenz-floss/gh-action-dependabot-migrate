@@ -9,7 +9,13 @@ updates:
     directory: "/"
     schedule:
       interval: "monthly"
+    labels:
+      - "part:tooling"
+      - "type:tech-debt"
   - package-ecosystem: "gitsubmodule"
     directory: "/"
     schedule:
       interval: "monthly"
+    labels:
+      - "part:tooling"
+      - "type:tech-debt"
