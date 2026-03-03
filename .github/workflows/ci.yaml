@@ -4,8 +4,18 @@
 name: CI
 
 on:
+  merge_group:
   push:
-    branches: [v0.x.x]
+    # We need to explicitly include tags because otherwise when adding
+    # `branches-ignore` it will only trigger on branches.
+    tags:
+      - '*'
+    branches-ignore:
+      # Ignore pushes to merge queues.
+      # We only want to test the merge commit (`merge_group` event), the hashes
+      # in the push were already tested by the PR checks
+      - 'gh-readonly-queue/**'
+      - 'dependabot/**'
   pull_request:
   workflow_dispatch:
 
