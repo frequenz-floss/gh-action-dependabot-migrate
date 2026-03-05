@@ -9,6 +9,9 @@
 #   OLD_VERSION          – version being upgraded from (e.g. 0.13.1)
 #   NEW_VERSION          – version being upgraded to (e.g. 0.15.0)
 #   SCRIPT_URL_TEMPLATE  – URL template with {version} placeholder
+#                          (mutually exclusive with MIGRATION_SCRIPT)
+#   MIGRATION_SCRIPT     – inline migration script body
+#                          (mutually exclusive with SCRIPT_URL_TEMPLATE)
 #   ITERATE_V0_MINORS    – "true" to iterate v0.x intermediate minors
 #   MIGRATION_TOKEN_INPUT – optional token exposed as GITHUB_TOKEN
 #                           and GH_TOKEN
@@ -54,39 +57,60 @@ OVERALL_EXIT=0
 FULL_REPORT=""
 
 for version in "${VERSIONS[@]}"; do
-  SCRIPT_URL="${SCRIPT_URL_TEMPLATE//\{version\}/$version}"
-  SECTION_HEADER="=== ${version} =========================================================
+  SCRIPT_FILE="/tmp/migrate_${version}.py"
+
+  if [ -n "${MIGRATION_SCRIPT:-}" ]; then
+    # ── Inline script mode ──────────────────────────────────────────
+    SECTION_HEADER="=== ${version} =========================================================
+Source: inline script"
+
+    echo ""
+    echo "========================================"
+    echo "Running migration for $version ..."
+    echo "(inline script)"
+    echo "========================================"
+
+    printf '%s\n' "$MIGRATION_SCRIPT" >"$SCRIPT_FILE"
+  else
+    # ── URL template mode ───────────────────────────────────────────
+    SCRIPT_URL="${SCRIPT_URL_TEMPLATE//\{version\}/$version}"
+    SECTION_HEADER="=== ${version} =========================================================
 Script URL: ${SCRIPT_URL}"
 
-  echo ""
-  echo "========================================"
-  echo "Running migration for $version ..."
-  echo "<$SCRIPT_URL>"
-  echo "========================================"
+    echo ""
+    echo "========================================"
+    echo "Running migration for $version ..."
+    echo "<$SCRIPT_URL>"
+    echo "========================================"
 
-  HTTP_CODE=$(curl -sL -w "%{http_code}" -o "/tmp/migrate_${version}.py" "$SCRIPT_URL")
+    HTTP_CODE=$(curl -sL -w "%{http_code}" -o "$SCRIPT_FILE" "$SCRIPT_URL")
 
-  if [ "$HTTP_CODE" != "200" ]; then
-    echo "::error::Migration script not found for $version (HTTP $HTTP_CODE)."
-    FULL_REPORT="${FULL_REPORT}${SECTION_HEADER}
+    if [ "$HTTP_CODE" != "200" ]; then
+      echo "::error::Migration script not found for $version (HTTP $HTTP_CODE)."
+      FULL_REPORT="${FULL_REPORT}${SECTION_HEADER}
 
 Migration script not found (HTTP ${HTTP_CODE}).
 
 "
-    OVERALL_EXIT=1
-    continue
+      OVERALL_EXIT=1
+      continue
+    fi
   fi
 
+  # ── Execute the migration script ────────────────────────────────
+  #
   # We use Python -I (isolate) mode to prevent the migration script from
   # importing any modules (like `os.py`) from the current working directory,
   # which is the checked out untrusted pull request code.
   if [ -n "$MIGRATION_TOKEN_INPUT" ]; then
-    SCRIPT_OUTPUT=$(GITHUB_TOKEN="$MIGRATION_TOKEN_INPUT" \
+    SCRIPT_OUTPUT=$(MIGRATION_VERSION="$version" \
+      GITHUB_TOKEN="$MIGRATION_TOKEN_INPUT" \
       GH_TOKEN="$MIGRATION_TOKEN_INPUT" \
-      python3 -I "/tmp/migrate_${version}.py" 2>&1)
+      python3 -I "$SCRIPT_FILE" 2>&1)
   else
     SCRIPT_OUTPUT=$(env -u GITHUB_TOKEN -u GH_TOKEN \
-      python3 -I "/tmp/migrate_${version}.py" 2>&1)
+      MIGRATION_VERSION="$version" \
+      python3 -I "$SCRIPT_FILE" 2>&1)
   fi
   EXIT_CODE=$?
 

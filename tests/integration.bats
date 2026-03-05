@@ -22,6 +22,7 @@ setup() {
   export INTERVENTION_DONE_LABEL="intervention-done"
   export INTERVENTION_PENDING_LABEL_COLOR="#DE36AD"
   export INTERVENTION_DONE_LABEL_COLOR="#0E8A16"
+  unset MIGRATION_SCRIPT
 }
 
 teardown() {
@@ -204,4 +205,81 @@ _parse_output_heredoc() {
   run cat "${REPORT_OUTPUT}"
   assert_output --partial "Manual Intervention Needed"
   assert_output --partial "Migration script not found"
+}
+
+# ── Inline script pipeline ─────────────────────────────────────────
+
+@test "end-to-end: inline script success feeds into success report" {
+  # ── 1. Run migration ────────────────────────────────────────────
+  export OLD_VERSION="0.5.0"
+  export NEW_VERSION="0.6.0"
+  export ITERATE_V0_MINORS="true"
+  export MIGRATION_TOKEN_INPUT=""
+  unset SCRIPT_URL_TEMPLATE
+  export MIGRATION_SCRIPT='import os; print("Inline applied for " + os.environ["MIGRATION_VERSION"])'
+
+  bash "${REPO_ROOT}/scripts/run-migration.sh"
+
+  OVERALL_EXIT=$(_parse_output_value "overall_exit" "${GITHUB_OUTPUT}")
+  REPORT=$(_parse_output_heredoc "report" "${GITHUB_OUTPUT}")
+
+  [ "$OVERALL_EXIT" = "0" ]
+  [ -n "$REPORT" ]
+
+  # ── 2. Build report ─────────────────────────────────────────────
+  REPORT_OUTPUT="$(mktemp)"
+
+  OLD_VERSION="0.5.0" \
+  NEW_VERSION="0.6.0" \
+  OVERALL_EXIT="${OVERALL_EXIT}" \
+  REPORT="${REPORT}" \
+  INTERVENTION_PENDING_LABEL="${INTERVENTION_PENDING_LABEL}" \
+  INTERVENTION_DONE_LABEL="${INTERVENTION_DONE_LABEL}" \
+  GITHUB_SERVER_URL="${GITHUB_SERVER_URL}" \
+  GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
+  GITHUB_RUN_ID="${GITHUB_RUN_ID}" \
+  GITHUB_OUTPUT="${REPORT_OUTPUT}" \
+    bash "${REPO_ROOT}/scripts/build-report.sh"
+
+  run cat "${REPORT_OUTPUT}"
+  assert_output --partial "Migration completed successfully"
+  assert_output --partial "Inline applied for v0.6.0"
+  assert_output --partial "0.5.0"
+  assert_output --partial "0.6.0"
+}
+
+@test "end-to-end: inline script failure produces intervention report" {
+  # ── 1. Run migration (fails) ────────────────────────────────────
+  export OLD_VERSION="1.0.0"
+  export NEW_VERSION="2.0.0"
+  export ITERATE_V0_MINORS="true"
+  export MIGRATION_TOKEN_INPUT=""
+  unset SCRIPT_URL_TEMPLATE
+  export MIGRATION_SCRIPT='import sys; print("Inline error: missing dep"); sys.exit(1)'
+
+  bash "${REPO_ROOT}/scripts/run-migration.sh"
+
+  OVERALL_EXIT=$(_parse_output_value "overall_exit" "${GITHUB_OUTPUT}")
+  REPORT=$(_parse_output_heredoc "report" "${GITHUB_OUTPUT}")
+
+  [ "$OVERALL_EXIT" = "1" ]
+
+  # ── 2. Build report ─────────────────────────────────────────────
+  REPORT_OUTPUT="$(mktemp)"
+
+  OLD_VERSION="1.0.0" \
+  NEW_VERSION="2.0.0" \
+  OVERALL_EXIT="${OVERALL_EXIT}" \
+  REPORT="${REPORT}" \
+  INTERVENTION_PENDING_LABEL="${INTERVENTION_PENDING_LABEL}" \
+  INTERVENTION_DONE_LABEL="${INTERVENTION_DONE_LABEL}" \
+  GITHUB_SERVER_URL="${GITHUB_SERVER_URL}" \
+  GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
+  GITHUB_RUN_ID="${GITHUB_RUN_ID}" \
+  GITHUB_OUTPUT="${REPORT_OUTPUT}" \
+    bash "${REPO_ROOT}/scripts/build-report.sh"
+
+  run cat "${REPORT_OUTPUT}"
+  assert_output --partial "Manual Intervention Needed"
+  assert_output --partial "Inline error: missing dep"
 }

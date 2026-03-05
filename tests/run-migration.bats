@@ -7,12 +7,13 @@ setup() {
   load test-helper/common
   _common_setup
 
-  # Default environment — a simple v0.x minor bump.
+  # Default environment — a simple v0.x minor bump with URL mode.
   export OLD_VERSION="0.13.1"
   export NEW_VERSION="0.15.0"
   export SCRIPT_URL_TEMPLATE="https://example.com/migrate-{version}.py"
   export ITERATE_V0_MINORS="true"
   export MIGRATION_TOKEN_INPUT=""
+  unset MIGRATION_SCRIPT
 }
 
 teardown() {
@@ -333,4 +334,144 @@ teardown() {
   run cat "${GITHUB_OUTPUT}"
   assert_output --partial "=== v0.6.0 ========================================================="
   assert_output --partial "Script URL: https://example.com/migrate-v0.6.0.py"
+}
+
+# ── Inline script mode ────────────────────────────────────────────
+
+@test "inline script executes and sets overall_exit=0" {
+  unset SCRIPT_URL_TEMPLATE
+  export MIGRATION_SCRIPT='print("Inline migration ran")'
+  export OLD_VERSION="0.5.0"
+  export NEW_VERSION="0.6.0"
+
+  run bash "${REPO_ROOT}/scripts/run-migration.sh"
+  assert_success
+
+  assert_output --partial "Inline migration ran"
+
+  run cat "${GITHUB_OUTPUT}"
+  assert_output --partial "overall_exit=0"
+  assert_output --partial "migration_ran=true"
+}
+
+@test "inline script failure sets overall_exit=1" {
+  unset SCRIPT_URL_TEMPLATE
+  export MIGRATION_SCRIPT='import sys; print("Inline failed"); sys.exit(1)'
+  export OLD_VERSION="0.5.0"
+  export NEW_VERSION="0.6.0"
+
+  run bash "${REPO_ROOT}/scripts/run-migration.sh"
+  assert_success
+
+  assert_output --partial "Inline failed"
+
+  run cat "${GITHUB_OUTPUT}"
+  assert_output --partial "overall_exit=1"
+  assert_output --partial "migration_ran=true"
+}
+
+@test "inline script report includes source header" {
+  unset SCRIPT_URL_TEMPLATE
+  export MIGRATION_SCRIPT='print("OK")'
+  export OLD_VERSION="0.5.0"
+  export NEW_VERSION="0.6.0"
+
+  run bash "${REPO_ROOT}/scripts/run-migration.sh"
+  assert_success
+
+  run cat "${GITHUB_OUTPUT}"
+  assert_output --partial "=== v0.6.0 ========================================================="
+  assert_output --partial "Source: inline script"
+  refute_output --partial "Script URL:"
+}
+
+@test "inline script logs say inline script" {
+  unset SCRIPT_URL_TEMPLATE
+  export MIGRATION_SCRIPT='print("OK")'
+  export OLD_VERSION="0.5.0"
+  export NEW_VERSION="0.6.0"
+
+  run bash "${REPO_ROOT}/scripts/run-migration.sh"
+  assert_success
+  assert_output --partial "(inline script)"
+}
+
+@test "inline script runs once per version in v0.x iteration" {
+  unset SCRIPT_URL_TEMPLATE
+  export MIGRATION_SCRIPT='import os; print("migrating " + os.environ["MIGRATION_VERSION"])'
+  export OLD_VERSION="0.13.1"
+  export NEW_VERSION="0.15.0"
+  export ITERATE_V0_MINORS="true"
+
+  run bash "${REPO_ROOT}/scripts/run-migration.sh"
+  assert_success
+
+  assert_output --partial "migrating v0.14.0"
+  assert_output --partial "migrating v0.15.0"
+
+  run cat "${GITHUB_OUTPUT}"
+  assert_output --partial "overall_exit=0"
+}
+
+@test "inline script receives MIGRATION_VERSION env var" {
+  unset SCRIPT_URL_TEMPLATE
+  export MIGRATION_SCRIPT='import os; print("VER=" + os.environ.get("MIGRATION_VERSION", "UNSET"))'
+  export OLD_VERSION="0.5.0"
+  export NEW_VERSION="0.6.0"
+
+  run bash "${REPO_ROOT}/scripts/run-migration.sh"
+  assert_success
+  assert_output --partial "VER=v0.6.0"
+}
+
+@test "inline script with migration token gets GITHUB_TOKEN" {
+  unset SCRIPT_URL_TEMPLATE
+  export MIGRATION_SCRIPT='import os; print("TOKEN=" + os.environ.get("GITHUB_TOKEN", "UNSET"))'
+  export MIGRATION_TOKEN_INPUT="inline-test-token"
+  export OLD_VERSION="0.5.0"
+  export NEW_VERSION="0.6.0"
+
+  run bash "${REPO_ROOT}/scripts/run-migration.sh"
+  assert_success
+  assert_output --partial "TOKEN=inline-test-token"
+}
+
+@test "inline script without migration token has no GITHUB_TOKEN" {
+  unset SCRIPT_URL_TEMPLATE
+  export MIGRATION_SCRIPT='import os; print("TOKEN=" + os.environ.get("GITHUB_TOKEN", "UNSET"))'
+  export MIGRATION_TOKEN_INPUT=""
+  export GITHUB_TOKEN="should-be-unset"
+  export GH_TOKEN="should-be-unset"
+  export OLD_VERSION="0.5.0"
+  export NEW_VERSION="0.6.0"
+
+  run bash "${REPO_ROOT}/scripts/run-migration.sh"
+  assert_success
+  assert_output --partial "TOKEN=UNSET"
+}
+
+@test "inline script with ANSI codes strips them from report" {
+  unset SCRIPT_URL_TEMPLATE
+  export MIGRATION_SCRIPT=$'print("\\033[31mRed inline\\033[0m")'
+  export OLD_VERSION="0.5.0"
+  export NEW_VERSION="0.6.0"
+
+  run bash "${REPO_ROOT}/scripts/run-migration.sh"
+  assert_success
+
+  run cat "${GITHUB_OUTPUT}"
+  assert_output --partial "Red inline"
+  refute_output --partial $'\033[31m'
+}
+
+# ── MIGRATION_VERSION in URL mode ─────────────────────────────────
+
+@test "URL mode also exposes MIGRATION_VERSION" {
+  export OLD_VERSION="0.5.0"
+  export NEW_VERSION="0.6.0"
+  export MOCK_CURL_SCRIPT_BODY='import os; print("VER=" + os.environ.get("MIGRATION_VERSION", "UNSET"))'
+
+  run bash "${REPO_ROOT}/scripts/run-migration.sh"
+  assert_success
+  assert_output --partial "VER=v0.6.0"
 }

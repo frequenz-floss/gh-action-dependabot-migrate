@@ -99,7 +99,8 @@ Both CI and local runs use this file so results stay consistent.
 
 ## Helper scripts
 
-- `scripts/run-migration.sh` — download/run migration script(s)
+- `scripts/run-migration.sh` — download/run migration script(s) or
+  execute inline scripts
 - `scripts/build-report.sh` — build Markdown summary/comment body
 - `scripts/create-label.sh` — ensure labels exist with configured metadata
 - `scripts/add-label.sh` — ensure/add labels with configured colours
@@ -108,7 +109,8 @@ Both CI and local runs use this file so results stay consistent.
 - `scripts/handle-patch-update.sh` — patch-only auto-merge flow
 
 `tests/test-helper/common.bash` provides a mock `curl` so tests can emulate
-downloaded migration scripts without network access.
+downloaded migration scripts without network access.  Inline-script tests
+bypass `curl` entirely and write the script body to a temp file directly.
 
 ## CI workflow
 
