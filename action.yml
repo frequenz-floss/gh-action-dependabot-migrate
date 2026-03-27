@@ -396,7 +396,7 @@ runs:
       # update version fix, which left updated-dependencies-json incomplete.
       # See:
       # https://github.com/dependabot/fetch-metadata/issues/402
-      uses: dependabot/fetch-metadata@e74077de530ef48d09568e2268558f6093a85509  # main
+      uses: dependabot/fetch-metadata@4c0bbfe3a642ee5826e71be3cb91cd949dc0a897  # main
 
     # ── 6. Decide whether a migration is needed ────────────────────────
     #
