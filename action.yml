@@ -5,8 +5,8 @@
 # Dependabot Migrate — Composite Action
 #
 # A GitHub Action for running migration scripts on Dependabot PRs.
-# Workflows using this action provide a script URL template and
-# configure labels/behaviour via inputs.
+# Workflows using this action provide either a script URL template or
+# an inline migration script, and configure labels/behaviour via inputs.
 #
 # Architecture notes:
 #
@@ -106,8 +106,20 @@ inputs:
   script-url-template:
     description: >-
       URL template for the migration script.  Use {version} as a
-      placeholder for the version tag (e.g. v0.15.0).
-    required: true
+      placeholder for the version tag (e.g. v0.15.0).  Mutually
+      exclusive with `migration-script` — provide exactly one.
+    required: false
+    default: ""
+  migration-script:
+    description: >-
+      Inline migration script body (Python).  The script is saved to
+      a temporary file and executed with `python3 -I` once per version
+      in the upgrade range, exactly like URL-fetched scripts.  The
+      current version being migrated is available as the
+      `MIGRATION_VERSION` environment variable.  Mutually exclusive
+      with `script-url-template` — provide exactly one.
+    required: false
+    default: ""
   token:
     description: >-
       Token used for pushing migration commits, PR approval, and
@@ -270,15 +282,30 @@ runs:
   steps:
     # ── 1. Validate inputs ─────────────────────────────────────────────
     #
-    # Fail fast if the workflow set `auto-merge-on-changes` but forgot to
-    # provide the `token` needed for approval and merging.
+    # Fail fast on misconfigurations: exactly one of script-url-template
+    # and migration-script must be provided, and auto-merge-on-changes
+    # requires token.
     - name: Validate inputs
       id: validate-inputs
       shell: bash
       env:
         TOKEN: ${{ inputs.token }}
         AUTO_MERGE_ON_CHANGES: ${{ inputs.auto-merge-on-changes }}
+        SCRIPT_URL_TEMPLATE: ${{ inputs.script-url-template }}
+        MIGRATION_SCRIPT: ${{ inputs.migration-script }}
       run: |
+        if [ -n "$SCRIPT_URL_TEMPLATE" ] && [ -n "$MIGRATION_SCRIPT" ]; then
+          echo "::error::\`script-url-template\` and \`migration-script\` are" \
+            "mutually exclusive — provide exactly one."
+          exit 1
+        fi
+
+        if [ -z "$SCRIPT_URL_TEMPLATE" ] && [ -z "$MIGRATION_SCRIPT" ]; then
+          echo "::error::Either \`script-url-template\` or \`migration-script\`" \
+            "must be provided."
+          exit 1
+        fi
+
         if [ "$AUTO_MERGE_ON_CHANGES" = "true" ] \
             && [ -z "$TOKEN" ]; then
           echo "::error::\`auto-merge-on-changes\` requires the \`token\` input."
@@ -494,6 +521,7 @@ runs:
         OLD_VERSION: ${{ steps.check-update.outputs.old_version }}
         NEW_VERSION: ${{ steps.check-update.outputs.new_version }}
         SCRIPT_URL_TEMPLATE: ${{ inputs.script-url-template }}
+        MIGRATION_SCRIPT: ${{ inputs.migration-script }}
         ITERATE_V0_MINORS: ${{ inputs.iterate-v0-minors }}
         MIGRATION_TOKEN_INPUT: ${{ inputs.migration-token }}
         ACTION_PATH: ${{ github.action_path }}

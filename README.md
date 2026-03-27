@@ -8,6 +8,16 @@ upgrade range, commits file changes back to the PR branch, posts a
 summary comment, and — optionally — auto-approves and auto-merges
 clean migrations.
 
+The migration script can be provided in two ways (mutually exclusive):
+
+* **URL template** (`script-url-template`) — the action downloads a
+  separate script for each version from a URL with a `{version}`
+  placeholder.
+* **Inline script** (`migration-script`) — the script body is embedded
+  directly in the workflow YAML and executed once per version, with the
+  current version available as the `MIGRATION_VERSION` environment
+  variable.
+
 > [!NOTE]
 > Migration scripts must be valid Python programs.  See [Writing a
 > migration script](#writing-a-migration-script) for the full contract.
@@ -25,7 +35,8 @@ script reports manual intervention is needed.
 2. A workflow in your repository triggers the action.
 3. The action fetches Dependabot metadata (old/new versions).
 4. For each version in the upgrade range, the migration script is
-   downloaded from the URL template and executed.
+   downloaded from the URL template (or the inline script is used) and
+   executed.
 5. File changes are committed to the PR branch.
 6. A PR comment and job summary are posted with the results.
 7. If all migrations succeed (exit code 0) **and** auto-merge is enabled
@@ -101,6 +112,11 @@ upgrade range.  Scripts must follow these conventions:
 * **Language** — scripts must be valid Python programs.  The Python
   version is configurable via `python-version`.
 
+* **Version** — the current version being migrated is available as
+  the `MIGRATION_VERSION` environment variable (e.g. `v0.15.0`).
+  This is always set, regardless of whether the script was provided
+  via URL template or inline.
+
 * **Exit code** — return **0** if the migration succeeded.  Return a
   **non-zero** exit code if manual intervention is needed.  A non-zero
   exit causes the action to add the `intervention-pending` label, fail
@@ -149,6 +165,24 @@ jobs:
             https://raw.githubusercontent.com/my-org/my-repo/{version}/migrate.py
 ```
 
+Alternatively, embed the migration script directly in the workflow
+(useful when the migration logic is simple and self-contained):
+
+```yaml
+jobs:
+  migrate:
+    if: contains(github.event.pull_request.title, 'the my-tool group')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: frequenz-floss/gh-action-dependabot-migrate@<sha>  # <version>
+        with:
+          migration-script: |
+            import os, subprocess
+            version = os.environ["MIGRATION_VERSION"]
+            print(f"Migrating to {version}")
+            subprocess.run(["sed", "-i", "s/old_value/new_value/g", "config.yaml"], check=True)
+```
+
 To enable auto-approve and auto-merge, generate a token in a prior step
 and pass it to the action.  The recommended approach is a [GitHub App]
 (see [scenario 2](#2-trusted-script-auto-merge-no-workflow-file-changes)
@@ -184,14 +218,16 @@ jobs:
 > are treated as fork PRs: `GITHUB_TOKEN` is read-only and secrets are
 > unavailable with a plain `pull_request` trigger.  The action mitigates
 > the risk by never executing code from the PR — the migration script is
-> fetched from an upstream tag.  For details, see [Preventing pwn
+> either fetched from an upstream tag or embedded in the workflow YAML on
+> the base branch.  For details, see [Preventing pwn
 > requests](https://securitylab.github.com/research/github-actions-preventing-pwn-requests/).
 
 ### Inputs
 
 | Input | Required | Default | Description |
 |---|---|---|---|
-| `script-url-template` | **yes** | — | URL with `{version}` placeholder for the migration script |
+| `script-url-template` | **one of** | `""` | URL with `{version}` placeholder for the migration script (mutually exclusive with `migration-script`) |
+| `migration-script` | **one of** | `""` | Inline Python script body executed per version; receives `MIGRATION_VERSION` env var (mutually exclusive with `script-url-template`) |
 | `token` | no | `""` | Token for pushing, PR approval, and auto-merge (see [Authentication](#authentication)) |
 | `migration-token` | no | `""` | Token exposed to migration scripts as `GH_TOKEN`/`GITHUB_TOKEN` (see [Authentication](#authentication)) |
 | `auto-merge-on-changes` | no | `"false"` | Auto-approve and auto-merge even when the migration produced commits (requires `token`) |
