@@ -14,6 +14,7 @@ setup() {
   export GITHUB_SERVER_URL="https://github.com"
   export GITHUB_REPOSITORY="test-org/test-repo"
   export GITHUB_RUN_ID="12345"
+  export UPDATED_DEPENDENCIES_JSON='[{"dependencyName":"example","prevVersion":"0.5.0","newVersion":"0.6.0","updateType":"version-update:semver-minor"}]'
   export COMMIT_MADE="false"
   export AUTO_MERGE_ON_CHANGES="false"
   export TOKEN_PROVIDED="true"
