@@ -8,6 +8,9 @@
 # Expected environment variables (set by the composite action):
 #   OLD_VERSION          – version being upgraded from (e.g. 0.13.1)
 #   NEW_VERSION          – version being upgraded to (e.g. 0.15.0)
+#   UPDATED_DEPENDENCIES_JSON – JSON array from dependabot/fetch-metadata
+#                          with full dependency update details; passed
+#                          through to migration scripts via the environment
 #   SCRIPT_URL_TEMPLATE  – URL template with {version} placeholder
 #                          (mutually exclusive with MIGRATION_SCRIPT)
 #   MIGRATION_SCRIPT     – inline migration script body
@@ -25,6 +28,8 @@ OLD_MAJOR=$(echo "$OLD_VERSION" | sed -E 's/^([0-9]+)\..*/\1/')
 NEW_MAJOR=$(echo "$NEW_VERSION" | sed -E 's/^([0-9]+)\..*/\1/')
 
 echo "Old: v${OLD_MAJOR}.${OLD_MINOR}, New: v${NEW_MAJOR}.${NEW_MINOR}"
+echo "Updated dependencies JSON:"
+echo "$UPDATED_DEPENDENCIES_JSON" | jq -C . 2>/dev/null || echo "$UPDATED_DEPENDENCIES_JSON"
 
 # Build the list of versions to migrate through.
 VERSIONS=()

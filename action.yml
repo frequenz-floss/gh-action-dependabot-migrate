@@ -516,6 +516,7 @@ runs:
       env:
         OLD_VERSION: ${{ steps.check-update.outputs.old_version }}
         NEW_VERSION: ${{ steps.check-update.outputs.new_version }}
+        UPDATED_DEPENDENCIES_JSON: ${{ steps.dependabot-metadata.outputs.updated-dependencies-json }}
         SCRIPT_URL_TEMPLATE: ${{ inputs.script-url-template }}
         MIGRATION_SCRIPT: ${{ inputs.migration-script }}
         ITERATE_V0_MINORS: ${{ inputs.iterate-v0-minors }}

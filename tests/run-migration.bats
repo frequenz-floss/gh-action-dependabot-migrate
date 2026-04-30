@@ -10,6 +10,7 @@ setup() {
   # Default environment — a simple v0.x minor bump with URL mode.
   export OLD_VERSION="0.13.1"
   export NEW_VERSION="0.15.0"
+  export UPDATED_DEPENDENCIES_JSON='[{"dependencyName":"example","prevVersion":"0.13.1","newVersion":"0.15.0","updateType":"version-update:semver-minor"}]'
   export SCRIPT_URL_TEMPLATE="https://example.com/migrate-{version}.py"
   export ITERATE_V0_MINORS="true"
   export MIGRATION_TOKEN_INPUT=""
@@ -474,4 +475,79 @@ teardown() {
   run bash "${REPO_ROOT}/scripts/run-migration.sh"
   assert_success
   assert_output --partial "VER=v0.6.0"
+}
+
+# ── UPDATED_DEPENDENCIES_JSON passthrough ─────────────────────────
+
+@test "UPDATED_DEPENDENCIES_JSON is logged" {
+  export OLD_VERSION="0.5.0"
+  export NEW_VERSION="0.6.0"
+  export UPDATED_DEPENDENCIES_JSON='[{"dependencyName":"foo","prevVersion":"0.5.0","newVersion":"0.6.0"}]'
+
+  run bash "${REPO_ROOT}/scripts/run-migration.sh"
+  assert_success
+  assert_output --partial "Updated dependencies JSON:"
+  assert_output --partial "dependencyName"
+}
+
+@test "URL mode exposes UPDATED_DEPENDENCIES_JSON to migration script" {
+  export OLD_VERSION="0.5.0"
+  export NEW_VERSION="0.6.0"
+  export UPDATED_DEPENDENCIES_JSON='[{"dependencyName":"foo"}]'
+  export MOCK_CURL_SCRIPT_BODY='import os, json; d = json.loads(os.environ["UPDATED_DEPENDENCIES_JSON"]); print("DEP=" + d[0]["dependencyName"])'
+
+  run bash "${REPO_ROOT}/scripts/run-migration.sh"
+  assert_success
+  assert_output --partial "DEP=foo"
+}
+
+@test "inline script receives UPDATED_DEPENDENCIES_JSON" {
+  unset SCRIPT_URL_TEMPLATE
+  export MIGRATION_SCRIPT='import os, json; d = json.loads(os.environ["UPDATED_DEPENDENCIES_JSON"]); print("DEP=" + d[0]["dependencyName"])'
+  export OLD_VERSION="0.5.0"
+  export NEW_VERSION="0.6.0"
+  export UPDATED_DEPENDENCIES_JSON='[{"dependencyName":"bar"}]'
+
+  run bash "${REPO_ROOT}/scripts/run-migration.sh"
+  assert_success
+  assert_output --partial "DEP=bar"
+}
+
+@test "UPDATED_DEPENDENCIES_JSON is available with migration token" {
+  export OLD_VERSION="0.5.0"
+  export NEW_VERSION="0.6.0"
+  export MIGRATION_TOKEN_INPUT="test-token"
+  export UPDATED_DEPENDENCIES_JSON='[{"dependencyName":"tokenised"}]'
+  export MOCK_CURL_SCRIPT_BODY='import os, json; d = json.loads(os.environ["UPDATED_DEPENDENCIES_JSON"]); print("DEP=" + d[0]["dependencyName"])'
+
+  run bash "${REPO_ROOT}/scripts/run-migration.sh"
+  assert_success
+  assert_output --partial "DEP=tokenised"
+}
+
+@test "jq failure falls back to raw JSON output" {
+  export OLD_VERSION="0.5.0"
+  export NEW_VERSION="0.6.0"
+  export UPDATED_DEPENDENCIES_JSON='[{"dependencyName":"fallback"}]'
+
+  # Shadow jq with a script that always fails.
+  cat >"${MOCK_DIR}/jq" <<'MOCK_JQ'
+#!/usr/bin/env bash
+exit 1
+MOCK_JQ
+  chmod +x "${MOCK_DIR}/jq"
+
+  run bash "${REPO_ROOT}/scripts/run-migration.sh"
+  assert_success
+  assert_output --partial '[{"dependencyName":"fallback"}]'
+}
+
+@test "malformed JSON falls back to raw output" {
+  export OLD_VERSION="0.5.0"
+  export NEW_VERSION="0.6.0"
+  export UPDATED_DEPENDENCIES_JSON='not valid json'
+
+  run bash "${REPO_ROOT}/scripts/run-migration.sh"
+  assert_success
+  assert_output --partial "not valid json"
 }
