@@ -82,6 +82,7 @@
 #  21. Approve and auto-merge             – clean migration only
 #  22. Handle patch-only updates          – auto-merge with token,
 #                                           otherwise instruct manual review
+#  23. Resolve public outputs             – always(), consolidate outputs
 #
 # Label ordering (step 19): intervention-pending-label is added BEFORE
 # migrated-label.  If interrupted between the two API calls, the PR
@@ -168,13 +169,39 @@ inputs:
       When empty, the calling workflow title is used.
     required: false
     default: ""
+  version-iteration:
+    description: >-
+      Controls which intermediate versions to run migration scripts
+      for when a multi-version jump is detected.  "false" runs only
+      the target version; "major" runs for each major boundary
+      (vX.0.0); "minor" also runs for each minor boundary within
+      the target major; "patch" also runs for each patch within the
+      target minor.  When empty (default), falls back to the
+      deprecated `iterate-v0-minors` input for backward
+      compatibility.
+    required: false
+    default: ""
+  if-no-iterations:
+    description: >-
+      Controls what happens when `version-iteration` produces no
+      versions to migrate.  "error" fails the action so the
+      unexpected no-op is not missed; "pass" treats it as a clean
+      migration with no file changes.  When empty (default), uses
+      "error" — except under the deprecated `iterate-v0-minors`
+      fallback or when neither iteration input is set (implicit
+      v0.x default), where it defaults to "pass" for backward
+      compatibility.
+    required: false
+    default: ""
   iterate-v0-minors:
     description: >-
-      When "true" (default), v0.x bumps iterate through each
-      intermediate minor version.  When "false", only the target
-      version is run.
+      Deprecated — use `version-iteration` instead.  When "true",
+      v0.x bumps iterate through each intermediate minor version.
+      When "false", only the target version is run.  When empty
+      (default), the input is inactive.  Mutually exclusive with
+      `version-iteration`.
     required: false
-    default: "true"
+    default: ""
   python-version:
     description: >-
       Python version to use for running the migration script.
@@ -261,21 +288,32 @@ inputs:
 
 outputs:
   migration_ran:
-    description: Whether the migration script(s) executed.
-    value: ${{ steps.run-migration.outputs.migration_ran }}
+    description: >-
+      Whether migration has been handled: "true" when script(s)
+      executed, when no versions needed migrating and
+      `if-no-iterations` is "pass", when a previous run already
+      migrated this PR, or when the update is patch-only without
+      `version-iteration`.  "false" otherwise.
+    value: ${{ steps.resolve-outputs.outputs.migration_ran }}
   overall_exit:
     description: >-
-      Consolidated exit code: "0" if all scripts succeeded, "1" if
-      any required intervention.
-    value: ${{ steps.run-migration.outputs.overall_exit }}
+      Consolidated outcome code: "0" when no intervention is needed
+      for this run, "1" when migration or intervention handling
+      requires attention, or when a required pre-check fails.
+    value: ${{ steps.resolve-outputs.outputs.overall_exit }}
   needs_migration:
     description: >-
-      Whether a migration was needed: "true" for minor/major bumps,
-      "false" for patch-only.
-    value: ${{ steps.check-update.outputs.needs_migration }}
+      Whether this run entered the migration flow: "true" for
+      minor/major bumps and patch bumps when `version-iteration` is
+      set, "false" for patch-only bumps without
+      `version-iteration`, already-migrated re-triggers, and other
+      runs that do not enter migration.
+    value: ${{ steps.resolve-outputs.outputs.needs_migration }}
   commit_made:
-    description: Whether the migration produced a commit.
-    value: ${{ steps.commit-result.outputs.commit_made }}
+    description: >-
+      Whether this run produced a migration commit.  "false" when
+      no commit was made.
+    value: ${{ steps.resolve-outputs.outputs.commit_made }}
 
 runs:
   using: composite
@@ -293,24 +331,11 @@ runs:
         AUTO_MERGE_ON_CHANGES: ${{ inputs.auto-merge-on-changes }}
         SCRIPT_URL_TEMPLATE: ${{ inputs.script-url-template }}
         MIGRATION_SCRIPT: ${{ inputs.migration-script }}
-      run: |
-        if [ -n "$SCRIPT_URL_TEMPLATE" ] && [ -n "$MIGRATION_SCRIPT" ]; then
-          echo "::error::\`script-url-template\` and \`migration-script\` are" \
-            "mutually exclusive — provide exactly one."
-          exit 1
-        fi
-
-        if [ -z "$SCRIPT_URL_TEMPLATE" ] && [ -z "$MIGRATION_SCRIPT" ]; then
-          echo "::error::Either \`script-url-template\` or \`migration-script\`" \
-            "must be provided."
-          exit 1
-        fi
-
-        if [ "$AUTO_MERGE_ON_CHANGES" = "true" ] \
-            && [ -z "$TOKEN" ]; then
-          echo "::error::\`auto-merge-on-changes\` requires the \`token\` input."
-          exit 1
-        fi
+        VERSION_ITERATION: ${{ inputs.version-iteration }}
+        IF_NO_ITERATIONS: ${{ inputs.if-no-iterations }}
+        ITERATE_V0_MINORS: ${{ inputs.iterate-v0-minors }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: "${ACTION_PATH}/scripts/validate-inputs.sh"
 
     # ── 2. Determine current state from PR labels ──────────────────────
     #
@@ -423,9 +448,16 @@ runs:
 
     # ── 6. Decide whether a migration is needed ────────────────────────
     #
-    # Patch-only bumps never need migration.  Versions are resolved
-    # from updated-dependencies-json for both single and grouped
-    # updates.
+    # Versions are resolved from updated-dependencies-json for both
+    # single and grouped updates.
+    #
+    # When version-iteration is NOT set (backward-compat path), patch-
+    # only bumps short-circuit here — run-migration.sh never runs and
+    # handle-patch-update.sh handles them instead.
+    #
+    # When version-iteration IS set, all update types — including
+    # patch — flow through run-migration.sh so that the configured
+    # iteration strategy is honoured.
     - name: Check update type
       if: >-
         steps.check-status.outputs.already_migrated == 'false'
@@ -437,53 +469,9 @@ runs:
       env:
         UPDATE_TYPE: ${{ steps.dependabot-metadata.outputs.update-type }}
         DEPS_JSON: ${{ steps.dependabot-metadata.outputs.updated-dependencies-json }}
+        VERSION_ITERATION: ${{ inputs.version-iteration }}
       run: |
-        if ! command -v jq >/dev/null 2>&1; then
-          echo "::error::jq is required to parse updated-dependencies-json."
-          exit 1
-        fi
-
-        OLD_VERSIONS=$(echo "$DEPS_JSON" \
-          | jq -r '.[].prevVersion | select(. != "" and . != null)')
-        NEW_VERSIONS=$(echo "$DEPS_JSON" \
-          | jq -r '.[].newVersion | select(. != "" and . != null)')
-
-        if [ -z "$OLD_VERSIONS" ] || [ -z "$NEW_VERSIONS" ]; then
-          echo "::error::Could not resolve versions from updated-dependencies-json."
-          echo "::error::updated-dependencies-json: $DEPS_JSON"
-          exit 1
-        fi
-
-        OLD_VERSION=$(echo "$OLD_VERSIONS" | sort -V | head -1)
-        NEW_VERSION=$(echo "$NEW_VERSIONS" | sort -V | tail -1)
-        echo "Resolved update range: ${OLD_VERSION} → ${NEW_VERSION}"
-
-        if [ -z "$UPDATE_TYPE" ]; then
-          if echo "$DEPS_JSON" \
-            | jq -e '.[] | select(.updateType == "version-update:semver-major")' \
-              >/dev/null; then
-            UPDATE_TYPE="version-update:semver-major"
-          elif echo "$DEPS_JSON" \
-            | jq -e '.[] | select(.updateType == "version-update:semver-minor")' \
-              >/dev/null; then
-            UPDATE_TYPE="version-update:semver-minor"
-          else
-            UPDATE_TYPE="version-update:semver-patch"
-          fi
-        fi
-
-        {
-          echo "update_type=$UPDATE_TYPE"
-          echo "old_version=$OLD_VERSION"
-          echo "new_version=$NEW_VERSION"
-        } >>"$GITHUB_OUTPUT"
-
-        if [ "$UPDATE_TYPE" = "version-update:semver-patch" ]; then
-          echo "needs_migration=false" >>"$GITHUB_OUTPUT"
-          echo "Patch update only — no migration needed."
-        else
-          echo "needs_migration=true" >>"$GITHUB_OUTPUT"
-        fi
+        bash "${{ github.action_path }}/scripts/check-update.sh"
 
     # ── 7. Checkout the PR branch so the migration can modify files ────
     - name: Checkout PR branch
@@ -519,6 +507,8 @@ runs:
         UPDATED_DEPENDENCIES_JSON: ${{ steps.dependabot-metadata.outputs.updated-dependencies-json }}
         SCRIPT_URL_TEMPLATE: ${{ inputs.script-url-template }}
         MIGRATION_SCRIPT: ${{ inputs.migration-script }}
+        VERSION_ITERATION: ${{ inputs.version-iteration }}
+        IF_NO_ITERATIONS: ${{ inputs.if-no-iterations }}
         ITERATE_V0_MINORS: ${{ inputs.iterate-v0-minors }}
         MIGRATION_TOKEN_INPUT: ${{ inputs.migration-token }}
         ACTION_PATH: ${{ github.action_path }}
@@ -832,6 +822,7 @@ runs:
     # For patch-only updates we either auto-merge (when token is provided)
     # or post a guidance comment and leave merge/approval to a human.
     - name: Handle patch update
+      id: handle-patch-update
       if: >-
         steps.check-status.outputs.already_migrated == 'false'
         && steps.check-update.outputs.needs_migration == 'false'
@@ -851,3 +842,32 @@ runs:
           ${{ inputs.auto-merged-label-description }}
         REPORT_TITLE: ${{ inputs.report-title || github.workflow }}
       run: "${{ github.action_path }}/scripts/handle-patch-update.sh"
+
+    # ── 23. Resolve public outputs ──────────────────────────────────────
+    #
+    # Runs with `always()` so the public outputs are resolved in every
+    # handled code path: migration ran, no-iteration pass/error,
+    # patch-only update, already-migrated re-trigger, or a failure in
+    # a required pre-check.  Internal steps (10-22) still gate on the
+    # original step outputs; this step only feeds the action's public
+    # outputs.
+    - name: Resolve public outputs
+      id: resolve-outputs
+      if: always()
+      shell: bash
+      env:
+        VALIDATE_INPUTS_CONCLUSION: ${{ steps.validate-inputs.conclusion }}
+        CHECK_STATUS_CONCLUSION: ${{ steps.check-status.conclusion }}
+        HANDLE_INTERVENTION_CONCLUSION: ${{ steps.handle-intervention.conclusion }}
+        DEPENDABOT_METADATA_CONCLUSION: ${{ steps.dependabot-metadata.conclusion }}
+        CHECK_UPDATE_CONCLUSION: ${{ steps.check-update.conclusion }}
+        RUN_MIGRATION_CONCLUSION: ${{ steps.run-migration.conclusion }}
+        HANDLE_PATCH_UPDATE_CONCLUSION: ${{ steps.handle-patch-update.conclusion }}
+        SCRIPT_MIGRATION_RAN: ${{ steps.run-migration.outputs.migration_ran }}
+        SCRIPT_OVERALL_EXIT: ${{ steps.run-migration.outputs.overall_exit }}
+        SCRIPT_COMMIT_MADE: ${{ steps.commit-result.outputs.commit_made }}
+        ALREADY_MIGRATED: ${{ steps.check-status.outputs.already_migrated }}
+        INTERVENTION_PENDING: ${{ steps.check-status.outputs.intervention_pending }}
+        NEEDS_MIGRATION: ${{ steps.check-update.outputs.needs_migration }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: "${ACTION_PATH}/scripts/resolve-outputs.sh"
