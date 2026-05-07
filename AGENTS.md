@@ -56,9 +56,12 @@ conditions, output references, and step IDs are consistent.
 ## Repository layout
 
 ```
-action.yml                  # Composite action definition (19 steps)
+action.yml                  # Composite action definition
 scripts/run-migration.sh    # Helper: run migration scripts
 scripts/build-report.sh     # Helper: build Markdown summary
+scripts/check-update.sh     # Helper: decide if migration is needed
+scripts/validate-inputs.sh  # Helper: validate composite action inputs
+scripts/resolve-outputs.sh  # Helper: consolidate public outputs
 scripts/create-label.sh     # Helper: ensure label exists/updated
 scripts/add-label.sh        # Helper: ensure/add PR labels
 scripts/remove-label.sh     # Helper: remove PR labels safely

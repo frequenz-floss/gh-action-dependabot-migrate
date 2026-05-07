@@ -37,6 +37,13 @@ script reports manual intervention is needed.
 4. For each version in the upgrade range, the migration script is
    downloaded from the URL template (or the inline script is used) and
    executed.
+   If the selected `version-iteration` mode produces no versions, the
+   action fails by default so the unexpected no-op is visible.  Set
+   `if-no-iterations: "pass"` to treat that edge case as a clean
+   migration with no file changes.  (When `version-iteration` is not
+   set, the implicit v0.x default and the deprecated
+   `iterate-v0-minors` fallback both default to `"pass"` for backward
+   compatibility.)
 5. File changes are committed to the PR branch.
 6. A PR comment and job summary are posted with the results.
 7. If all migrations succeed (exit code 0) **and** auto-merge is enabled
@@ -116,6 +123,21 @@ upgrade range.  Scripts must follow these conventions:
   the `MIGRATION_VERSION` environment variable (e.g. `v0.15.0`).
   This is always set, regardless of whether the script was provided
   via URL template or inline.
+
+* **Version iteration** — `version-iteration` controls which versions
+  are generated for multi-version jumps.  Explicit values are `"false"`,
+  `"major"`, `"minor"`, and `"patch"`.  When empty (the default), the
+  action preserves backward-compatible behaviour (v0.x bumps iterate
+  intermediate minors, other bumps target only the new version) and
+  emits a deprecation warning — set `version-iteration` explicitly to
+  silence the warning.  Boundary-only modes can legitimately produce no
+  versions when the Dependabot update does not cross that boundary.  In
+  that case, `if-no-iterations` controls whether the action fails
+  (`"error"`) or passes as a no-op migration (`"pass"`).  When
+  `if-no-iterations` is empty (the default), it uses `"error"` — except
+  under the implicit v0.x default and the deprecated
+  `iterate-v0-minors` fallback, where it uses `"pass"` for backward
+  compatibility.
 
 * **Exit code** — return **0** if the migration succeeded.  Return a
   **non-zero** exit code if manual intervention is needed.  A non-zero
@@ -233,7 +255,9 @@ jobs:
 | `auto-merge-on-changes` | no | `"false"` | Auto-approve and auto-merge even when the migration produced commits (requires `token`) |
 | `sign-commits` | no | `"false"` | When `"true"`, create migration commits via API so commits have verified signatures (when supported, for example when using a GitHub App for `token`) |
 | `report-title` | no | `""` | Heading used for PR comments and job summaries; when empty, uses the calling workflow title |
-| `iterate-v0-minors` | no | `"true"` | Iterate through intermediate v0.x minor versions |
+| `version-iteration` | no | `""` | Controls generated migration versions: `"false"` runs only the target version; `"major"`, `"minor"`, and `"patch"` iterate semver boundaries.  When empty, the action preserves backward-compatible behaviour (v0.x minor iteration) and emits a deprecation warning — set this explicitly to silence the warning. |
+| `if-no-iterations` | no | `""` | What to do when `version-iteration` produces no versions: `"error"` fails the action; `"pass"` treats it as a clean no-op migration.  Defaults to `"error"` — except under the implicit v0.x default and the deprecated `iterate-v0-minors` fallback, where it defaults to `"pass"`. |
+| `iterate-v0-minors` | no | `""` | Deprecated; use `version-iteration` instead.  When set to "true", v0.x bumps iterate intermediate minor versions; when "false", only the target version is run.  When empty (default), the implicit v0.x minor iteration applies instead.  Mutually exclusive with `version-iteration`. |
 | `python-version` | no | `"3.14"` | Python version for running the script |
 | `expected-actor` | no | `dependabot[bot]` | GitHub actor whose PRs trigger migration and auto-approval (gates metadata fetch, migration decision, and patch-only auto-approve) |
 | `migrated-label` | no | `migrated` | Label name for migrated state |
@@ -253,10 +277,10 @@ jobs:
 
 | Output | Description |
 |---|---|
-| `migration_ran` | Whether the migration script(s) executed |
-| `overall_exit` | Consolidated exit code: `"0"` if all scripts succeeded, `"1"` if any required intervention |
-| `needs_migration` | `"true"` for minor/major bumps, `"false"` for patch-only |
-| `commit_made` | Whether the migration produced a commit |
+| `migration_ran` | Whether migration has been handled: `"true"` when script(s) executed, no versions needed migrating, the PR was already migrated, or the update is patch-only without `version-iteration`; `"false"` otherwise. |
+| `overall_exit` | Consolidated outcome code.  `"0"` when no intervention is needed for this run; `"1"` when migration or intervention handling requires attention, or when a required pre-check fails. |
+| `needs_migration` | Whether this run entered the migration flow.  `"true"` for minor/major bumps and patch bumps when `version-iteration` is set; `"false"` for patch-only without `version-iteration`, already-migrated re-triggers, and other runs that do not enter migration. |
+| `commit_made` | Whether this run produced a migration commit.  `"false"` when no commit was made. |
 
 ### Requirements
 

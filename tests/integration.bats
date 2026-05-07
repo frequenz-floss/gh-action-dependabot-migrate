@@ -23,6 +23,11 @@ setup() {
   export INTERVENTION_DONE_LABEL="intervention-done"
   export INTERVENTION_PENDING_LABEL_COLOR="#DE36AD"
   export INTERVENTION_DONE_LABEL_COLOR="#0E8A16"
+  # Reset iteration inputs so inherited shell env vars cannot leak into
+  # individual tests.
+  unset ITERATE_V0_MINORS
+  unset VERSION_ITERATION
+  unset IF_NO_ITERATIONS
   unset MIGRATION_SCRIPT
 }
 
@@ -283,4 +288,46 @@ _parse_output_heredoc() {
   run cat "${REPORT_OUTPUT}"
   assert_output --partial "Manual Intervention Needed"
   assert_output --partial "Inline error: missing dep"
+}
+
+# ── No-iteration pipeline ──────────────────────────────────────────
+
+@test "end-to-end: no iterations can pass as a clean no-op migration" {
+  # ── 1. Run migration with no generated versions ─────────────────
+  export OLD_VERSION="2.3.1"
+  export NEW_VERSION="2.3.4"
+  export VERSION_ITERATION="minor"
+  export IF_NO_ITERATIONS="pass"
+  export MIGRATION_TOKEN_INPUT=""
+  export SCRIPT_URL_TEMPLATE="https://example.com/migrate-{version}.py"
+
+  bash "${REPO_ROOT}/scripts/run-migration.sh"
+
+  OVERALL_EXIT=$(_parse_output_value "overall_exit" "${GITHUB_OUTPUT}")
+  REPORT=$(_parse_output_heredoc "report" "${GITHUB_OUTPUT}")
+  MIGRATION_RAN=$(_parse_output_value "migration_ran" "${GITHUB_OUTPUT}")
+
+  [ "$OVERALL_EXIT" = "0" ]
+  [ "$MIGRATION_RAN" = "true" ]
+  [ "$REPORT" = "No versions to migrate." ]
+
+  # ── 2. Build report ─────────────────────────────────────────────
+  REPORT_OUTPUT="$(mktemp)"
+
+  OLD_VERSION="2.3.1" \
+  NEW_VERSION="2.3.4" \
+  OVERALL_EXIT="${OVERALL_EXIT}" \
+  REPORT="${REPORT}" \
+  INTERVENTION_PENDING_LABEL="${INTERVENTION_PENDING_LABEL}" \
+  INTERVENTION_DONE_LABEL="${INTERVENTION_DONE_LABEL}" \
+  GITHUB_SERVER_URL="${GITHUB_SERVER_URL}" \
+  GITHUB_REPOSITORY="${GITHUB_REPOSITORY}" \
+  GITHUB_RUN_ID="${GITHUB_RUN_ID}" \
+  GITHUB_OUTPUT="${REPORT_OUTPUT}" \
+    bash "${REPO_ROOT}/scripts/build-report.sh"
+
+  run cat "${REPORT_OUTPUT}"
+  assert_output --partial "Migration completed successfully"
+  assert_output --partial "No versions to migrate."
+  refute_output --partial "Manual Intervention Needed"
 }
