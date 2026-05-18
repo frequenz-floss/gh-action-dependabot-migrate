@@ -516,6 +516,7 @@ runs:
 
     # ── 10. Set up Git for committing migration changes ────────────────
     - name: Set up Git
+      id: setup-git
       if: >-
         steps.run-migration.outputs.migration_ran == 'true'
       uses: frequenz-floss/gh-action-setup-git@f9d86a01228ee1cadaac5224d4d7626f1eb23f90  # v1.0.0
@@ -634,6 +635,7 @@ runs:
     # to GITHUB_TOKEN, which is sufficient for pushing to PR branches
     # as long as no workflow files were changed.
     - name: Push migration changes
+      id: push-migration
       if: >-
         steps.commit-result.outputs.commit_made == 'true'
         && inputs.sign-commits != 'true'
@@ -702,7 +704,10 @@ runs:
     #
     # Runs with `always()` so that labels are set even if a prior
     # non-critical step fails.  Only gated on `migration_ran` to
-    # avoid labeling when the migration never actually executed.
+    # avoid labeling when the migration never actually executed.  If
+    # committing or pushing migration changes failed, the migration state
+    # must not be recorded because the PR branch does not contain the
+    # migration result.
     #
     # Label ordering matters: intervention-pending-label is added
     # BEFORE migrated-label so that if the step is interrupted between
@@ -711,6 +716,12 @@ runs:
       if: >-
         always()
         && steps.run-migration.outputs.migration_ran == 'true'
+        && steps.setup-git.conclusion != 'failure'
+        && steps.build-commit-message.conclusion != 'failure'
+        && steps.commit-migration-local.conclusion != 'failure'
+        && steps.commit-migration-graphql.conclusion != 'failure'
+        && steps.commit-result.conclusion != 'failure'
+        && steps.push-migration.conclusion != 'failure'
       shell: bash
       env:
         PR_NUMBER: ${{ github.event.pull_request.number }}
