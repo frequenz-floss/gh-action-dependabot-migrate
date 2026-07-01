@@ -70,3 +70,44 @@ _action_step_block() {
   assert_success
   assert_output --partial "id: push-migration"
 }
+
+@test "check-status is wired to check-status.sh with marker + label envs" {
+  run _action_step_block "Check migration status"
+  assert_success
+
+  assert_output --partial "id: check-status"
+  assert_output --partial "LABEL_MIGRATED: \${{ inputs.migrated-label }}"
+  assert_output --partial "LABEL_PENDING: \${{ inputs.intervention-pending-label }}"
+  assert_output --partial "LABEL_DONE: \${{ inputs.intervention-done-label }}"
+  assert_output --partial "MIGRATION_MARKER: \"Applied-by: frequenz-floss/gh-action-dependabot-migrate\""
+  assert_output --partial "scripts/check-status.sh"
+}
+
+@test "build commit message embeds the migration marker" {
+  run _action_step_block "Build commit message"
+  assert_success
+
+  assert_output --partial "MIGRATION_MARKER: \"Applied-by: frequenz-floss/gh-action-dependabot-migrate\""
+  assert_output --partial "\"\$MIGRATION_MARKER\""
+}
+
+@test "migration marker literal is consistent across steps" {
+  # Both the writer (build-commit-message) and the reader (check-status)
+  # MUST hold the same literal, or the self-heal detection breaks.
+  MARKER_COUNT=$(grep -c \
+    'MIGRATION_MARKER: "Applied-by: frequenz-floss/gh-action-dependabot-migrate"' \
+    "${REPO_ROOT}/action.yml")
+  [ "$MARKER_COUNT" -eq 2 ]
+}
+
+@test "action.yml has no dangling recreate-label references" {
+  # Option A's command-label surface must be fully removed.
+  run grep -F "recreate-label" "${REPO_ROOT}/action.yml"
+  assert_failure
+
+  run grep -F "handle-recreate" "${REPO_ROOT}/action.yml"
+  assert_failure
+
+  run grep -F "HANDLE_RECREATE_CONCLUSION" "${REPO_ROOT}/action.yml"
+  assert_failure
+}
