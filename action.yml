@@ -592,7 +592,7 @@ runs:
         && inputs.sign-commits == 'true'
         && steps.build-commit-message.outputs.has_changes == 'true'
       id: commit-migration-graphql
-      uses: planetscale/ghcommit-action@25309d8005ac7c3bcd61d3fe19b69e0fe47dbdde  # v0.2.20
+      uses: planetscale/ghcommit-action@a6b150b81dca5dd027baa898604418eec9e11465  # v0.2.22
       env:
         GITHUB_TOKEN: ${{ inputs.token || github.token }}
       with:
