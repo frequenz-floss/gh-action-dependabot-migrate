@@ -93,6 +93,7 @@ Both CI and local runs use this file so results stay consistent.
 
 - `tests/run-migration.bats` — unit tests for `scripts/run-migration.sh`
 - `tests/build-report.bats` — unit tests for `scripts/build-report.sh`
+- `tests/check-status.bats` — unit tests for `scripts/check-status.sh`
 - `tests/label-management.bats` — unit tests for label helper scripts
 - `tests/integration.bats` — helper-script integration tests
 - `tests/test-helper/common.bash` — shared bats helpers and mocks
@@ -107,6 +108,9 @@ Both CI and local runs use this file so results stay consistent.
 - `scripts/remove-label.sh` — remove labels safely when present
 - `scripts/handle-intervention.sh` — intervention completion flow
 - `scripts/handle-patch-update.sh` — patch-only auto-merge flow
+- `scripts/check-status.sh` — read labels + commit history and
+  self-heal the migrated label when the migration commit is gone
+  (post-`@dependabot recreate` state)
 
 `tests/test-helper/common.bash` provides a mock `curl` so tests can emulate
 downloaded migration scripts without network access.  Inline-script tests

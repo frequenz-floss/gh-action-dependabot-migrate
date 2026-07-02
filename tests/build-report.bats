@@ -305,3 +305,39 @@ teardown() {
   run cat "${GITHUB_OUTPUT}"
   assert_output --partial "Full migration logs"
 }
+
+# ── Rebase instructions ──────────────────────────────────────────
+
+@test "success report includes rebase instructions" {
+  export OVERALL_EXIT="0"
+
+  run bash "${REPO_ROOT}/scripts/build-report.sh"
+  assert_success
+
+  run cat "${GITHUB_OUTPUT}"
+  assert_output --partial "[!NOTE]"
+  assert_output --partial "If this PR needs rebasing later"
+  assert_output --partial "comment \`@dependabot recreate\`"
+}
+
+@test "failure report includes rebase instructions" {
+  export OVERALL_EXIT="1"
+
+  run bash "${REPO_ROOT}/scripts/build-report.sh"
+  assert_success
+
+  run cat "${GITHUB_OUTPUT}"
+  assert_output --partial "[!NOTE]"
+  assert_output --partial "If this PR needs rebasing later"
+  assert_output --partial "comment \`@dependabot recreate\`"
+}
+
+@test "rebase instructions mention that the action detects the missing commit" {
+  run bash "${REPO_ROOT}/scripts/build-report.sh"
+  assert_success
+
+  run cat "${GITHUB_OUTPUT}"
+  assert_output --partial "discards any current PR changes"
+  assert_output --partial "the migration commit is gone"
+  assert_output --partial "re-run the migration on the recreated commit"
+}

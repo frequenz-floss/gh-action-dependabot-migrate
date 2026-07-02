@@ -67,6 +67,9 @@ scripts/add-label.sh        # Helper: ensure/add PR labels
 scripts/remove-label.sh     # Helper: remove PR labels safely
 scripts/handle-intervention.sh  # Helper: intervention completion logic
 scripts/handle-patch-update.sh  # Helper: patch-only auto-merge logic
+scripts/check-status.sh         # Helper: read labels + commit history,
+                                # self-heal migrated label if the
+                                # migration commit is gone
 run-tests.sh                # Local lint/test entrypoint
 .yamllint.yaml              # yamllint configuration
 tests/*.bats                # Unit and integration tests

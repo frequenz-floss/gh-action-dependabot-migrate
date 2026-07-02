@@ -76,6 +76,10 @@ fi
 
 BODY="${BODY}
 
+> [!NOTE]
+> If this PR needs rebasing later, comment \`@dependabot recreate\` on the PR.
+> This discards any current PR changes.  Dependabot will regenerate the PR from the current base, and this action will detect that the migration commit is gone and re-run the migration on the recreated commit.
+
 ---
 📋 [Full migration logs](${RUN_URL})"
 

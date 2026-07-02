@@ -98,10 +98,14 @@ until intervention is marked done again.
 
 The action uses `migrated-label` to avoid re-running migration on every
 trigger for the same PR.  If you need to run migration again on the
-current PR:
-
-1. Remove the `migrated-label` (default `migrated`).
-2. Trigger a Dependabot update event via `@dependabot recreate`.
+current PR — for example, because the base branch has moved on and the
+PR needs rebasing — comment `@dependabot recreate` on the PR
+yourself.  Dependabot will regenerate the PR from the current base;
+the migration commit is dropped in the process.  On the next
+`synchronize` event, this action detects that the migration commit
+is no longer on the PR head (via a marker in the commit message),
+clears the `migrated` and intervention labels, and re-runs the
+migration on the recreated commit.
 
 > [!CAUTION]
 > Using `@dependabot recreate` will ignore all changes made to the PR and
@@ -712,7 +716,10 @@ files](#push-and-workflow-files)).
 The action manages these labels:
 
 - **`migrated-label`** (default `migrated`) — migration
-  script has been run
+  script has been run.  Presence is verified against the PR's commit
+  history on every run; if the migration commit is gone (e.g. after
+  `@dependabot recreate`), the label is cleared automatically and
+  migration re-runs.
 - **`intervention-pending-label`** (default
   `intervention-pending`) — migration needs manual
   intervention

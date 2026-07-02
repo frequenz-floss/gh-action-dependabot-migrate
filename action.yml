@@ -60,7 +60,9 @@
 # Step overview:
 #
 #   1. Validate inputs                    – fail-fast on misconfigurations
-#   2. Determine current state from labels – read labels for status
+#   2. Determine current state from labels + history – read labels;
+#                                           self-heal migrated label if the
+#                                           migration commit is gone
 #   3. Handle intervention resolution     – normalise labels
 #   4. Short-circuit if already migrated  – skip re-triggers
 #   5. Fetch Dependabot metadata          – versions, update type, group (gated)
@@ -69,7 +71,8 @@
 #   8. Set up Python                      – for running the migration script
 #   9. Run the migration script(s)        – execute per-version scripts
 #  10. Set up Git                         – just before commit
-#  11. Build commit message               – shared by local and GraphQL commit paths
+#  11. Build commit message               – shared by local and GraphQL commit paths;
+#                                           embeds the MIGRATION_MARKER trailer
 #  12. Commit migration changes (local)   – local git commit path
 #  13. Commit migration changes (GraphQL) – GraphQL API commit path
 #  14. Record commit result               – normalise commit_made output
@@ -88,6 +91,11 @@
 # migrated-label.  If interrupted between the two API calls, the PR
 # stays in a safe state (no migrated label → migration re-runs) rather
 # than a dangerous one (migrated without pending → looks clean).
+#
+# Re-running migration after `@dependabot recreate`: step 2 checks the
+# PR's commit history for the MIGRATION_MARKER embedded in step 11.
+# When Dependabot force-pushes a fresh commit, the marker is gone;
+# step 2 clears the migrated label and the migration flow re-runs.
 #
 # Reliability: step 9 writes migration outputs (overall_exit, report) before
 # any git operations.  Commit and push are explicit steps (11-15), so
@@ -337,10 +345,19 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
       run: "${ACTION_PATH}/scripts/validate-inputs.sh"
 
-    # ── 2. Determine current state from PR labels ──────────────────────
+    # ── 2. Determine current state from labels + commit history ───────
     #
-    # Read the PR labels to figure out whether the migration has already
-    # been run and whether there is still pending intervention.
+    # Read the PR labels to figure out whether migration has already
+    # been run and whether intervention is still pending.
+    #
+    # When the migrated-label is present, also verify that the
+    # migration commit is still on the PR head by grepping for the
+    # MIGRATION_MARKER trailer.  If the marker is gone (typically
+    # because `@dependabot recreate` force-pushed a fresh commit from
+    # the base), the label is stale — self-heal by clearing it and
+    # any intervention labels, so migration re-runs on the recreated
+    # commit.  The literal MIGRATION_MARKER MUST match the trailer
+    # emitted by the build-commit-message step.
     - name: Check migration status
       id: check-status
       shell: bash
@@ -350,20 +367,10 @@ runs:
         GH_TOKEN: ${{ github.token }}
         LABEL_MIGRATED: ${{ inputs.migrated-label }}
         LABEL_PENDING: ${{ inputs.intervention-pending-label }}
-      run: |
-        LABELS=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels -q '.labels[].name')
-
-        if echo "$LABELS" | grep -qxF "$LABEL_MIGRATED"; then
-          echo "already_migrated=true" >>"$GITHUB_OUTPUT"
-        else
-          echo "already_migrated=false" >>"$GITHUB_OUTPUT"
-        fi
-
-        if echo "$LABELS" | grep -qxF "$LABEL_PENDING"; then
-          echo "intervention_pending=true" >>"$GITHUB_OUTPUT"
-        else
-          echo "intervention_pending=false" >>"$GITHUB_OUTPUT"
-        fi
+        LABEL_DONE: ${{ inputs.intervention-done-label }}
+        MIGRATION_MARKER: "Applied-by: frequenz-floss/gh-action-dependabot-migrate"
+        ACTION_PATH: ${{ github.action_path }}
+      run: "${ACTION_PATH}/scripts/check-status.sh"
 
     # ── 3. Handle intervention label changes ───────────────────────────
     #
@@ -523,7 +530,11 @@ runs:
 
     # ── 11. Build commit message ────────────────────────────────────────
     #
-    # Shared by both commit paths.
+    # Shared by both commit paths.  Appends the MIGRATION_MARKER trailer
+    # so a later run can detect whether the migration commit is still
+    # present on the PR head — see the check-status step and
+    # scripts/check-status.sh.  The literal marker MUST match the one
+    # used by check-status.
     - name: Build commit message
       if: >-
         steps.run-migration.outputs.migration_ran == 'true'
@@ -534,6 +545,7 @@ runs:
         NEW_VERSION: ${{ steps.check-update.outputs.new_version }}
         OVERALL_EXIT: ${{ steps.run-migration.outputs.overall_exit }}
         MIGRATION_REPORT: ${{ steps.run-migration.outputs.report }}
+        MIGRATION_MARKER: "Applied-by: frequenz-floss/gh-action-dependabot-migrate"
       run: |
         if [ -z "$(git status --porcelain)" ]; then
           echo "No migration changes to commit."
@@ -561,7 +573,8 @@ runs:
 
         {
           echo "commit_message<<__COMMIT_MESSAGE_EOF__"
-          printf '%s\n\n%s\n\n%s\n' "$HEADLINE" "$BODY" "$FOOTER"
+          printf '%s\n\n%s\n\n%s\n\n%s\n' \
+            "$HEADLINE" "$BODY" "$FOOTER" "$MIGRATION_MARKER"
           echo "__COMMIT_MESSAGE_EOF__"
         } >>"$GITHUB_OUTPUT"
 
