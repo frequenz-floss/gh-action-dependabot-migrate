@@ -59,7 +59,7 @@ jobs:
       # actionlint validates workflow files only.
       # action.yml is covered by yamllint in the yamllint job.
       - name: Run actionlint with reviewdog
-        uses: reviewdog/action-actionlint@dbe5299849118fd6f099ba563d263d770955a64a  # v1.73.2
+        uses: reviewdog/action-actionlint@5d802a8ebdcb24d712925118c3a4596f571d8fcd  # v1.81.0
         with:
           reporter: "github-check"
           filter_mode: "nofilter"
